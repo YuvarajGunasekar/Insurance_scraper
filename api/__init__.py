@@ -1,0 +1,1 @@
+"""Isolated API layer for integrating an existing authorized scraper."""

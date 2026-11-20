@@ -1,0 +1,53 @@
+# ── Secrets and local environment ─────────────────────────────────────────
+# .env holds the portal login, database password and customer details.
+.env
+.env.*
+!.env.example
+# Saved login session cookies (grants access to the logged-in account).
+.auth/
+
+# ── Python ────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# ── Generated artifacts (folders are kept via .gitkeep) ───────────────────
+# Screenshots, logs and reports contain portal pages, agent and customer data.
+screenshots/*
+!screenshots/.gitkeep
+reports/*
+!reports/.gitkeep
+logs/*
+!logs/.gitkeep
+*.log
+
+# ── Recordings and captures of the portal ─────────────────────────────────
+videos/
+/frame-*.png
+/recording-*.png
+*.mp4
+*.webm
+
+# ── Scratch / one-off inspection scripts and page dumps ───────────────────
+scratch/
+
+# ── Playwright ────────────────────────────────────────────────────────────
+test-results/
+playwright-report/
+playwright/.cache/
+
+# ── Editors and OS ────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini

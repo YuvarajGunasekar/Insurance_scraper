@@ -1,0 +1,163 @@
+{
+  "info": {
+    "_postman_id": "59e6c6d6-463f-4e51-856a-98ff47bd26f4",
+    "name": "Authorized Scraping Trigger API",
+    "description": "Requests for the local scraping API. Set the collection variables locally. A configured existing scraper callable and API_ALLOWED_HOSTS are required before POST /api/scrape will accept jobs.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "api_base_url",
+      "value": "http://127.0.0.1:8000",
+      "type": "string"
+    },
+    {
+      "key": "website_url",
+      "value": "https://sz.indusindinsurance.co.in/",
+      "type": "string"
+    },
+    {
+      "key": "username",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "password",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "scrape_type",
+      "value": "full",
+      "type": "string"
+    },
+    {
+      "key": "task_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "login_task_id",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health Check",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{api_base_url}}/api/health",
+        "description": "Checks that the API is running and reports scraper/allowlist configuration."
+      },
+      "response": []
+    },
+    {
+      "name": "Start Scrape",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 202) {",
+              "    const result = pm.response.json();",
+              "    pm.collectionVariables.set('task_id', result.task_id);",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"website_url\": \"{{website_url}}\",\n  \"username\": \"{{username}}\",\n  \"password\": \"{{password}}\",\n  \"scrape_type\": \"full\",\n  \"vehicle\": {\n    \"registration_number\": \"\",\n    \"rto_location\": \"TN-01\",\n    \"make_model_variant\": \"TVS JUPITER\",\n    \"manufacturing_year\": \"2026\",\n    \"manufacturing_month\": \"February\",\n    \"purchase_date\": \"20-11-2026\",\n    \"policy_start_date\": \"20-11-2026\",\n    \"fuel_type\": \"Petrol\",\n    \"business_type\": \"New\",\n    \"customer_type\": \"Individual\",\n    \"ncb\": \"None\",\n    \"discount\": 0,\n    \"is_new_vehicle\": true\n  },\n  \"cover\": {\n    \"nil_depreciation\": true,\n    \"pa_to_owner_driver\": true\n  },\n  \"customer\": {\n    \"gender\": \"Male\",\n    \"occupation\": \"Others\",\n    \"marital_status\": \"Single\",\n    \"nationality\": \"Indian\",\n    \"registered_under_gst\": \"No\"\n  },\n  \"address\": {\n    \"same_as_comm\": true\n  }\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{api_base_url}}/api/scrape",
+        "description": "Submits an authorized scrape job and saves the returned task_id as a collection variable."
+      },
+      "response": []
+    },
+    {
+      "name": "Scrape Status",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{api_base_url}}/api/scrape/status/{{task_id}}",
+        "description": "Checks the task_id saved by the Start Scrape request."
+      },
+      "response": []
+    },
+    {
+      "name": "Start Manual Login",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 202) {",
+              "    const result = pm.response.json();",
+              "    pm.collectionVariables.set('login_task_id', result.task_id);",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"website_url\": \"{{website_url}}\",\n  \"username\": \"{{username}}\",\n  \"password\": \"{{password}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{api_base_url}}/api/login",
+        "description": "Opens a visible browser and fills URL/credentials. Enter CAPTCHA manually in the browser, then call Continue Manual Login."
+      },
+      "response": []
+    },
+    {
+      "name": "Continue Manual Login",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": "{{api_base_url}}/api/login/continue/{{login_task_id}}",
+        "description": "Call after entering the CAPTCHA manually in the visible browser."
+      },
+      "response": []
+    },
+    {
+      "name": "Manual Login Status",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{api_base_url}}/api/login/status/{{login_task_id}}",
+        "description": "Checks whether the manual login completed or failed."
+      },
+      "response": []
+    }
+  ]
+}
