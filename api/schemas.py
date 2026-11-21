@@ -10,45 +10,20 @@ from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr
 
 
 class ScrapeRequest(BaseModel):
-    """Parameters for a scraper job."""
+    """Credentials for a scraper job; other settings come from .env."""
 
     model_config = ConfigDict(
-        extra="allow",
+        extra="forbid",
         json_schema_extra={
             "example": {
-                "website_url": "https://sz.indusindinsurance.co.in/",
                 "username": "your-authorized-username",
                 "password": "your-authorized-password",
-                "scrape_type": "full",
-                "make_model_variant": "TVS JUPITER",
-                "rto_location": "TN-",
-                "registration_number": "",
-                "is_new_vehicle": True,
             }
         },
     )
 
-    website_url: AnyHttpUrl
     username: str = Field(min_length=1, max_length=256)
-    password: SecretStr
-    scrape_type: Literal["full"] = "full"
-    registration_number: str | None = None
-    rto_location: str | None = None
-    make_model_variant: str | None = None
-    manufacturing_year: str | None = None
-    manufacturing_month: str | None = None
-    purchase_date: str | None = None
-    policy_start_date: str | None = None
-    fuel_type: str | None = None
-    business_type: str | None = None
-    customer_type: str | None = None
-    ncb: str | None = None
-    discount: int | None = None
-    is_new_vehicle: bool | None = None
-    vehicle: VehicleRequest | None = None
-    cover: CoverRequest | None = None
-    customer: CustomerRequest | None = None
-    address: AddressRequest | None = None
+    password: SecretStr = Field(min_length=1)
 
 
 class HealthResponse(BaseModel):

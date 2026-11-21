@@ -33,6 +33,8 @@ class VehicleFormInput:
     is_new_vehicle: bool = True        # Check "New Vehicle" checkbox
     seating_capacity: str = ""
     vehicle_segment: str = ""
+    engine_number: str = ""            # e.g. "JA12E3456789" (Proposal Vehicle Details)
+    chassis_number: str = ""           # e.g. "MD625BG45M1234567" (Proposal Vehicle Details)
 
     def apply_dynamic_defaults(self) -> None:
         """Fill in blank mandatory fields with sensible dynamic defaults."""
@@ -64,7 +66,7 @@ class CoverDetailsInput:
 
     # Liability Covers
     tppd: bool = True
-    tppd_limit: str = "100000"
+    tppd_limit: str = "6000"
     basic_liability: bool = True
     pa_to_owner_driver: bool = True
     cpa_tenure: str = "1"
@@ -109,6 +111,10 @@ class CustomerInput:
     nationality: str = "Indian"
     registered_under_gst: str = "No"
     related_party: str = "No"
+    nominee_name: str = ""
+    nominee_dob: str = ""
+    nominee_relation: str = "Father"
+    nominee_age: str = ""
 
 
 @dataclass

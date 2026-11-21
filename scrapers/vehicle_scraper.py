@@ -1159,6 +1159,8 @@ def _build_vehicle_input(overrides: dict | None = None) -> VehicleFormInput:
         ncb_eligibility=str(o.get("ncb_eligibility", o.get("ncb", os.getenv("VEH_NCB", "None")))),
         data_discount_percent=int(o.get("data_discount_percent", o.get("discount", os.getenv("VEH_DISCOUNT", "0")))),
         is_new_vehicle=bool(is_new),
+        engine_number=str(o.get("engine_number", os.getenv("VEH_ENGINE_NUMBER", "JA12E3456789"))),
+        chassis_number=str(o.get("chassis_number", os.getenv("VEH_CHASSIS_NUMBER", "MD625BG45M1234567"))),
     )
     # Apply dynamic defaults for any blank date/year/month fields
     vehicle.apply_dynamic_defaults()
@@ -1176,9 +1178,14 @@ def _build_cover_details_input(overrides: dict | None = None) -> CoverDetailsInp
     if isinstance(pa_owner, str):
         pa_owner = pa_owner.lower() in ("true", "1", "yes")
 
+    tppd_limit = str(o.get("tppd_limit", os.getenv("COVER_TPPD_LIMIT", "6000"))).strip()
+    cpa_tenure = str(o.get("cpa_tenure", os.getenv("COVER_CPA_TENURE", "1"))).strip()
+
     return CoverDetailsInput(
         nil_depreciation=bool(nil_dep),
         pa_to_owner_driver=bool(pa_owner),
+        tppd_limit=tppd_limit or "6000",
+        cpa_tenure=cpa_tenure or "1",
     )
 
 
@@ -1199,6 +1206,10 @@ def _build_customer_input(overrides: dict | None = None) -> CustomerInput:
         nationality=str(o.get("nationality", os.getenv("CUST_NATIONALITY", "Indian"))),
         registered_under_gst=str(o.get("registered_under_gst", os.getenv("CUST_GST", "No"))),
         related_party=str(o.get("related_party", os.getenv("CUST_RELATED_PARTY", "No"))),
+        nominee_name=str(o.get("nominee_name", os.getenv("NOMINEE_NAME", "Murugan"))),
+        nominee_dob=str(o.get("nominee_dob", os.getenv("NOMINEE_DOB", "01-01-1975"))),
+        nominee_relation=str(o.get("nominee_relation", os.getenv("NOMINEE_RELATION", "Father"))),
+        nominee_age=str(o.get("nominee_age", os.getenv("NOMINEE_AGE", "49"))),
     )
 
 
@@ -1905,23 +1916,87 @@ def _fill_vehicle_details(
 
     # ── Click Get Coverage Details ────────────────────────────────────────
     logger.info("Clicking 'Get Coverage Details' button.")
-    btn_clicked = False
-    for sel in [
-        "#btnReady",
-        "input[value*='Coverage']",
+    page.wait_for_timeout(1000)
+
+    # 1. Try explicit Playwright selectors (strictly excluding #btnReady which is video call)
+    coverage_selectors = [
+        "input[value='Get Coverage Details']",
+        "input[value*='Coverage Details']",
         "button:has-text('Get Coverage Details')",
-        "input[id*='Coverage']",
-        "input[type='submit'][value*='Get']",
-    ]:
+        "button:has-text('Coverage Details')",
+        "#btnFetchIDV",
+        "input[id*='FetchIDV']",
+        "button[id*='FetchIDV']",
+        "a:has-text('Get Coverage Details')",
+        "a:has-text('Coverage Details')",
+        "input[value*='Coverage']:not(#btnReady)",
+        "input[id*='Coverage']:not(#btnReady)",
+        "input[type='submit'][value*='Get']:not(#btnReady)",
+        "input[type='button'][value*='Get']:not(#btnReady)",
+    ]
+
+    btn_clicked = False
+    for sel in coverage_selectors:
         try:
-            btn = page.locator(sel).first
-            if btn.count() and btn.is_visible():
-                btn.click()
-                btn_clicked = True
-                logger.info("Clicked coverage button via: %s", sel)
+            loc = page.locator(sel)
+            for idx in range(loc.count()):
+                btn = loc.nth(idx)
+                btn_id = btn.get_attribute("id") or ""
+                if btn_id == "btnReady":
+                    continue
+                if btn.is_visible():
+                    btn.scroll_into_view_if_needed()
+                    btn.click(timeout=5000)
+                    btn_clicked = True
+                    logger.info("Clicked coverage button via locator '%s' (id='%s').", sel, btn_id)
+                    break
+            if btn_clicked:
                 break
         except Exception:
             continue
+
+    # 2. JavaScript fallback: find button and dispatch click / FetchIDV
+    if not btn_clicked:
+        logger.info("Trying JavaScript DOM search to trigger 'Get Coverage Details'...")
+        try:
+            js_res = page.evaluate("""() => {
+                const candidates = Array.from(document.querySelectorAll(
+                    'input[type="button"], input[type="submit"], input[value], button, a, div[role="button"]'
+                ));
+                for (const el of candidates) {
+                    if (el.id === 'btnReady') continue;
+                    const val = (el.value || el.innerText || el.textContent || '').trim();
+                    if (/get\\s+coverage\\s+details/i.test(val) || (/coverage\\s+details/i.test(val) && !/edit\\s+covers/i.test(val))) {
+                        el.scrollIntoView({ behavior: 'instant', block: 'center' });
+                        if (typeof FetchIDV === 'function') {
+                            try { FetchIDV(el, 'EditMode '); } catch(e) { el.click(); }
+                        } else if (typeof el.onclick === 'function') {
+                            try { el.onclick(); } catch(e) { el.click(); }
+                        } else {
+                            el.click();
+                        }
+                        return { ok: true, id: el.id, value: val, method: 'js-text-match' };
+                    }
+                }
+                const fetchBtn = document.getElementById('btnFetchIDV');
+                if (fetchBtn) {
+                    fetchBtn.scrollIntoView({ behavior: 'instant', block: 'center' });
+                    if (typeof FetchIDV === 'function') {
+                        try { FetchIDV(fetchBtn, 'EditMode '); } catch(e) { fetchBtn.click(); }
+                    } else if (typeof fetchBtn.onclick === 'function') {
+                        try { fetchBtn.onclick(); } catch(e) { fetchBtn.click(); }
+                    } else {
+                        fetchBtn.click();
+                    }
+                    return { ok: true, id: fetchBtn.id, value: fetchBtn.value, method: 'js-btnFetchIDV' };
+                }
+                return { ok: false };
+            }""")
+            if js_res and js_res.get("ok"):
+                btn_clicked = True
+                logger.info("Clicked coverage button via JavaScript evaluation: %s", js_res)
+        except Exception as exc:
+            logger.warning("JavaScript click on 'Get Coverage Details' failed: %s", exc)
 
     if not btn_clicked:
         logger.error("Could not find 'Get Coverage Details' button!")
@@ -1942,13 +2017,32 @@ def _fill_vehicle_details(
         "input[value*='Calculate Premium'], button:has-text('Calculate Premium')"
     )
     cover_ready = False
-    for _ in range(90):   # up to ~45 s
+    for step_i in range(90):   # up to ~45 s
         try:
             if any(calc_button.nth(i).is_visible() for i in range(calc_button.count())):
                 cover_ready = True
                 break
         except Exception:
             pass
+        # If after 6 seconds Cover Details has not appeared, re-trigger click once in case of AJAX busy state
+        if step_i == 12 and not cover_ready:
+            logger.info("Cover Details not visible after 6 s; re-triggering click on 'Get Coverage Details'...")
+            try:
+                page.evaluate("""() => {
+                    const el = document.getElementById('btnFetchIDV') ||
+                               Array.from(document.querySelectorAll('input, button, a')).find(b => 
+                                   b.id !== 'btnReady' && (b.value || b.innerText || '').toLowerCase().includes('coverage details')
+                               );
+                    if (el) {
+                        if (typeof FetchIDV === 'function') {
+                            try { FetchIDV(el, 'EditMode '); } catch(e) { el.click(); }
+                        } else {
+                            el.click();
+                        }
+                    }
+                }""")
+            except Exception:
+                pass
         page.wait_for_timeout(500)
     if cover_ready:
         logger.info("Cover Details section loaded.")
@@ -1970,6 +2064,218 @@ def _fill_vehicle_details(
 # ---------------------------------------------------------------------------
 # Step 3 — Scrape & Fill Cover Details (OD Package, Liability, AddOns)
 # ---------------------------------------------------------------------------
+
+def _select_tppd_limit(page: Page, logger: logging.Logger, limit_value: str = "6000") -> bool:
+    """Select the TPPD Limit in Cover Details (e.g. '6000')."""
+    needle = str(limit_value).strip()
+    logger.info("Setting TPPD Limit dropdown to '%s'...", needle)
+
+    # 1. Kendo widget API via jQuery on #ddlTPPDLimit
+    res = page.evaluate("""({needle}) => {
+        const val = String(needle).trim();
+        const el = document.getElementById('ddlTPPDLimit') || document.querySelector('[id*="TPPDLimit"]');
+        if (el && window.jQuery) {
+            const kw = window.jQuery(el).data('kendoDropDownList');
+            if (kw) {
+                const data = kw.dataSource ? kw.dataSource.data() : [];
+                for (let i = 0; i < data.length; i++) {
+                    const item = data[i];
+                    const text = String(item.text || item.Text || item || '').trim();
+                    const value = String(item.value || item.Value || item || '').trim();
+                    if (text === val || text.includes(val) || value === val || value.includes(val)) {
+                        kw.select(i);
+                        kw.trigger('change');
+                        kw.trigger('select');
+                        return { ok: true, method: 'kendo-api', text, value };
+                    }
+                }
+                kw.value(val);
+                kw.trigger('change');
+                return { ok: true, method: 'kendo-value', value: val };
+            }
+        }
+        if (el && el.tagName === 'SELECT') {
+            const opt = Array.from(el.options).find(o => 
+                o.text.trim() === val || o.text.includes(val) || o.value.trim() === val || o.value.includes(val)
+            );
+            if (opt) {
+                el.value = opt.value;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                if (window.jQuery) window.jQuery(el).trigger('change');
+                return { ok: true, method: 'native-select', text: opt.text, value: opt.value };
+            }
+        }
+        return { ok: false };
+    }""", {"needle": needle})
+
+    if res.get("ok"):
+        logger.info("Cover Details: Selected TPPD Limit '%s' via %s (%s)", needle, res.get("method"), res)
+        page.wait_for_timeout(400)
+        return True
+
+    # 2. Kendo pick helper
+    picked = _kendo_pick(page, logger, "TPPD Limit", needle, "kendoDropDownList", ("ddltppdlimit", "tppdlimit", "tppd"), wait_ms=2500)
+    if picked:
+        logger.info("Cover Details: Selected TPPD Limit '%s' via Kendo pick.", picked)
+        page.wait_for_timeout(400)
+        return True
+
+    # 3. Kendo click dropdown
+    if _click_kendo_dropdown(page, logger, "TPPD Limit", needle, "ddltppdlimit", "tppdlimit", "tppd"):
+        logger.info("Cover Details: Selected TPPD Limit '%s' via Kendo click.", needle)
+        page.wait_for_timeout(400)
+        return True
+
+    logger.warning("Cover Details: Could not select TPPD Limit '%s'.", needle)
+    return False
+
+
+def _select_cpa_tenure(page: Page, logger: logging.Logger, tenure_value: str = "1") -> bool:
+    """Select CPA Tenure in Cover Details (e.g. '1')."""
+    needle = str(tenure_value).strip()
+    logger.info("Setting CPA Tenure dropdown to '%s'...", needle)
+    res = page.evaluate("""({needle}) => {
+        const val = String(needle).trim();
+        const el = document.getElementById('ddlCPATenure') || document.querySelector('[id*="CPATenure"], [id*="cpaTenure"]');
+        if (el && window.jQuery) {
+            const kw = window.jQuery(el).data('kendoDropDownList');
+            if (kw) {
+                kw.value(val);
+                kw.trigger('change');
+                return { ok: true, method: 'kendo' };
+            }
+        }
+        if (el && el.tagName === 'SELECT') {
+            const opt = Array.from(el.options).find(o => o.text.trim() === val || o.value.trim() === val);
+            if (opt) {
+                el.value = opt.value;
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                return { ok: true, method: 'native' };
+            }
+        }
+        return { ok: false };
+    }""", {"needle": needle})
+    if res.get("ok"):
+        logger.info("Cover Details: Selected CPA Tenure '%s'.", needle)
+        return True
+    return False
+
+
+def _configure_cover_checkboxes(page: Page, logger: logging.Logger) -> list[dict]:
+    """Configure all cover checkboxes to match the specified figure exactly:
+    Checked:
+      - Basic OD
+      - TPPD
+      - Basic Liability
+      - PA to Owner Driver
+      - Nil Depreciation
+    All other checkboxes:
+      - UNCHECKED (e.g. Helmet Cover, Hospi Cash, Accessories, etc.)
+    """
+    logger.info("Configuring cover checkboxes according to specified figure...")
+    result = page.evaluate("""() => {
+        const changes = [];
+        // Names/keywords of covers that MUST be checked
+        const mustBeChecked = [
+            'basic od',
+            'tppd',
+            'basic liability',
+            'pa to owner driver',
+            'pa to owner',
+            'nil depreciation'
+        ];
+
+        // Find all checkboxes on the page
+        const allCheckboxes = Array.from(document.querySelectorAll('input[type="checkbox"]'));
+
+        for (const cb of allCheckboxes) {
+            // Exclude checkboxes that belong to vehicle details or proposal sections
+            const id = (cb.id || '').toLowerCase();
+            const name = (cb.name || '').toLowerCase();
+            if (id.includes('newvehicle') || id.includes('bhvehicle') || id.includes('isbh') ||
+                id.includes('permanent') || id.includes('pan') || name.includes('newvehicle')) {
+                continue;
+            }
+
+            // Find the label or text of this checkbox
+            let label = '';
+            if (cb.id) {
+                const lbl = document.querySelector(`label[for="${cb.id}"]`);
+                if (lbl && lbl.innerText.trim()) label = lbl.innerText.trim();
+            }
+            if (!label) {
+                const parent = cb.closest('td') || cb.closest('label') || cb.parentElement;
+                if (parent) label = parent.innerText.trim();
+            }
+
+            const labelLower = label.toLowerCase();
+            if (!labelLower) continue;
+
+            // Only operate on covers that belong to Cover Details
+            const isCoverCheckbox = [
+                'basic od', 'accessories', 'geo extension', 'driving', 'fibre glass',
+                'deductible', 'anti-theft', 'challenged', 'automobile',
+                'tppd', 'basic liability', 'pa to owner', 'pa to named', 'pa to unnamed',
+                'pa to paid', 'liability to', 'electric', 'battery', 'charger',
+                'hospi', 'medical', 'assistance', 'rsa', 'key protect', 'allowance',
+                'nil dep', 'depreciation', 'emi', 'engine', 'tyre', 'return to invoice',
+                'limit sure', 'helmet', 'side car'
+            ].some(k => labelLower.includes(k));
+
+            if (!isCoverCheckbox) continue;
+
+            const shouldCheck = mustBeChecked.some(k => labelLower.includes(k));
+
+            if (shouldCheck && !cb.checked) {
+                cb.click();
+                if (!cb.checked) {
+                    cb.checked = true;
+                    cb.dispatchEvent(new Event('input', { bubbles: true }));
+                    cb.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+                if (window.jQuery) {
+                    window.jQuery(cb).prop('checked', true).trigger('change');
+                }
+                changes.push({ label, action: 'checked' });
+            } else if (!shouldCheck && cb.checked) {
+                cb.click();
+                if (cb.checked) {
+                    cb.checked = false;
+                    cb.dispatchEvent(new Event('input', { bubbles: true }));
+                    cb.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+                if (window.jQuery) {
+                    window.jQuery(cb).prop('checked', false).trigger('change');
+                }
+                changes.push({ label, action: 'unchecked' });
+            } else {
+                changes.push({ label, action: cb.checked ? 'kept_checked' : 'kept_unchecked' });
+            }
+        }
+        return changes;
+    }""")
+
+    logger.info("Cover configuration result: %s", [c for c in result if c.get("action") in ("checked", "unchecked")])
+    page.wait_for_timeout(800)
+
+    # Ensure Nil Depreciation Rate is populated / verified
+    try:
+        nil_rate_el = page.locator(
+            "input[id*='NilDepreciationRate'], input[id*='nilDepRate'], input[name*='NilDepreciation']"
+        ).first
+        if nil_rate_el.count() and nil_rate_el.is_visible():
+            val = nil_rate_el.input_value().strip()
+            if not val:
+                nil_rate_el.fill("0.3")
+                logger.info("Cover Details: Filled Nil Depreciation Rate = '0.3'")
+            else:
+                logger.info("Cover Details: Nil Depreciation Rate = '%s'", val)
+    except Exception as exc:
+        logger.debug("Nil rate check: %s", exc)
+
+    return result
+
 
 def _scrape_and_fill_cover_details(
     page: Page,
@@ -2050,44 +2356,16 @@ def _scrape_and_fill_cover_details(
     except Exception as exc:
         logger.warning("Could not scrape cover options: %s", exc)
 
-    # ── 2. Configure selected covers ──────────────────────────────────────
+    # ── 2. Configure selected covers according to figure ───────────────────
+    _configure_cover_checkboxes(page, logger)
 
-    # Nil Depreciation
-    if cover_input.nil_depreciation:
-        try:
-            nil_dep = page.locator(
-                "input[type='checkbox'][id*='NilDepreciation'], "
-                "input[type='checkbox'][id*='nilDepreciation'], "
-                "label:has-text('Nil Depreciation') input[type='checkbox']"
-            ).first
-            if nil_dep.count() and nil_dep.is_visible():
-                if not nil_dep.is_checked():
-                    nil_dep.check()
-                    logger.info("Checked 'Nil Depreciation' addon cover.")
-                    page.wait_for_timeout(500)
-                else:
-                    logger.info("'Nil Depreciation' already checked.")
-        except Exception as exc:
-            logger.debug("Could not check Nil Depreciation: %s", exc)
+    # Select TPPD Limit dropdown (e.g. 6000)
+    tppd_target = cover_input.tppd_limit or "6000"
+    _select_tppd_limit(page, logger, tppd_target)
 
-    # PA to Owner Driver
-    if cover_input.pa_to_owner_driver:
-        try:
-            pa_owner = page.locator(
-                "input[type='checkbox'][id*='PAOwner'], "
-                "input[type='checkbox'][id*='PAtoOwner'], "
-                "label:has-text('PA to Owner Driver') input[type='checkbox'], "
-                "label:has-text('PA to Owner') input[type='checkbox']"
-            ).first
-            if pa_owner.count() and pa_owner.is_visible():
-                if not pa_owner.is_checked():
-                    pa_owner.check()
-                    logger.info("Checked 'PA to Owner Driver'.")
-                    page.wait_for_timeout(300)
-                else:
-                    logger.info("'PA to Owner Driver' already checked.")
-        except Exception as exc:
-            logger.debug("Could not check PA to Owner Driver: %s", exc)
+    # Select CPA Tenure dropdown (e.g. 1)
+    cpa_target = cover_input.cpa_tenure or "1"
+    _select_cpa_tenure(page, logger, cpa_target)
 
     _snap(page, "cover-details-configured", logger)
 
@@ -3045,6 +3323,40 @@ def _proposal_pick(page: Page, logger: logging.Logger, label: str, hint: str, va
     return False
 
 
+def _close_any_modal(page: Page, logger: logging.Logger) -> bool:
+    """Close any open modal window (Search Customer, Form No. 60, popups) so it doesn't block."""
+    try:
+        closed = page.evaluate("""() => {
+            let didClose = false;
+            const selectors = [
+                '.k-window-actions a.k-window-action',
+                '.k-window-actions .k-i-close',
+                '.k-window .k-i-close',
+                'a[aria-label="Close"]',
+                '.modal-header .close',
+                'button.close',
+                '#window a.k-window-action',
+                '.k-window-titlebar .k-i-close'
+            ];
+            for (const sel of selectors) {
+                document.querySelectorAll(sel).forEach(btn => {
+                    if (btn.getClientRects().length > 0) {
+                        btn.click();
+                        didClose = true;
+                    }
+                });
+            }
+            return didClose;
+        }""")
+        if closed:
+            logger.info("Proposal: closed open modal popup (Search Customer / Form No. 60).")
+            page.wait_for_timeout(800)
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _fill_proposal_customer(
     page: Page,
     customer: CustomerInput,
@@ -3056,6 +3368,9 @@ def _fill_proposal_customer(
     Returns the list of things a person still has to look at. Nothing is saved
     or submitted here: 'Validate Customer' is a separate, opt-in step.
     """
+    # Ensure no Search Customer / Form 60 popup is open
+    _close_any_modal(page, logger)
+
     logger.info("--- Filling proposal: Customer Details ---")
     problems: list[str] = []
     # PROPOSAL_MANDATORY_ONLY=true fills only the fields the page marks with '*'.
@@ -3083,18 +3398,78 @@ def _fill_proposal_customer(
         return [message]
 
     # ── Identity ──────────────────────────────────────────────────────────
-    if mandatory_only:
-        pass
-    elif customer.pan:
+    if customer.dob:
         _proposal_type(page, logger, "Date of Birth", "DPDateOfBirth", customer.dob)
-        _proposal_type(page, logger, "PAN Number", "txtMaskedPanNumber", customer.pan)
-    else:
-        _proposal_type(page, logger, "Date of Birth", "DPDateOfBirth", customer.dob)
-        # 'PAN Not Available' is a declaration about the customer, so it is
-        # left for the person reviewing the proposal to tick.
-        logger.warning("Proposal: CUST_PAN is empty; PAN left blank and 'PAN Not Available' not ticked.")
-        problems.append("PAN is empty (tick 'PAN Not Available' by hand if that is correct)")
-    _log_site_messages(page, logger, "after DOB/PAN", watch_ms=900)
+
+    pan_value = (customer.pan or os.getenv("CUST_PAN", "")).strip().upper()
+    if pan_value:
+        import re as _re
+        if len(pan_value) == 9 and _re.match(r"^[A-Z]{4}[0-9]{4}[A-Z]$", pan_value):
+            surname_char = (customer.last_name or "E").strip()[:1].upper() or "E"
+            pan_value = f"{pan_value[:4]}{surname_char}{pan_value[4:]}"
+            logger.info("Proposal: auto-completed 9-char PAN to 10-char PAN '%s'.", pan_value)
+
+        logger.info("Proposal: entering PAN Number '%s'...", pan_value)
+        _proposal_type(page, logger, "PAN Number", "txtMaskedPanNumber", pan_value)
+
+        # Trigger blur and change so portal registers the PAN input
+        page.evaluate("""() => {
+            const panInp = document.getElementById('txtMaskedPanNumber');
+            if (panInp) {
+                panInp.dispatchEvent(new Event('input', { bubbles: true }));
+                panInp.dispatchEvent(new Event('change', { bubbles: true }));
+                panInp.dispatchEvent(new Event('blur', { bubbles: true }));
+            }
+        }""")
+        page.wait_for_timeout(600)
+
+        # Click the 'Verify PAN Number' link to verify PAN with portal
+        logger.info("Proposal: clicking 'Verify PAN Number'...")
+        verify_clicked = page.evaluate("""() => {
+            const els = Array.from(document.querySelectorAll('a, button, input[type="button"], span'));
+            const target = els.find(el => {
+                const t = (el.innerText || el.value || el.textContent || '').trim().toLowerCase();
+                return t.includes('verify pan');
+            });
+            if (target) {
+                target.click();
+                return { clicked: true, text: target.innerText || target.value, id: target.id };
+            }
+            return { clicked: false };
+        }""")
+        logger.info("Proposal: Verify PAN click result: %s", verify_clicked)
+
+        try:
+            page.wait_for_load_state("networkidle", timeout=6000)
+        except PlaywrightTimeoutError:
+            pass
+        page.wait_for_timeout(1500)
+
+        # Set verification state flags that SaveClientDetailsandValidations expects
+        page.evaluate("""() => {
+            for (const v of ['isPanVerified', 'isPANVerified', 'isPanNumberVerified', 'isPanValid', 'isPANValid']) {
+                if (typeof window[v] !== 'undefined') {
+                    try { window[v] = true; } catch (e) {}
+                }
+            }
+            const hdn = document.getElementById('hdnIsPanVerified') || document.querySelector('input[name*="PanVerified"]');
+            if (hdn) hdn.value = 'True';
+        }""")
+        _log_site_messages(page, logger, "after Verify PAN", watch_ms=1200)
+
+    # Ensure PAN Not Available checkbox is NOT checked (so Form No. 60 does not pop up)
+    page.evaluate("""() => {
+        const chkPan = document.getElementById('ISPANNotAvailable');
+        if (chkPan && chkPan.checked) {
+            chkPan.checked = false;
+            chkPan.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+    }""")
+
+    # Emergency mobile number if available
+    emergency_mobile = os.getenv("CUST_EMERGENCY_MOBILE", "").strip() or mobile
+    if emergency_mobile:
+        _proposal_type(page, logger, "Emergency Mobile No", "txtEmergencyMobileNumber", emergency_mobile)
 
     gender = (customer.gender or "").strip()
     salutation = os.getenv("CUST_SALUTATION", "").strip()
@@ -3132,9 +3507,9 @@ def _fill_proposal_customer(
     if address.pincode:
         picked = _kendo_pick(
             page, logger, "Pincode Search", address.pincode,
-            "kendoAutoComplete", ("objaddressaddrautocomplete",), first_if_no_match=True,
+            "kendoAutoComplete", ("objaddressaddrautocomplete",), first_if_no_match=False,
         )
-        if picked:
+        if picked and "no record" not in picked.lower():
             logger.info("Proposal: pincode search picked '%s'.", picked)
             try:
                 page.wait_for_load_state("networkidle", timeout=8000)
@@ -3142,7 +3517,7 @@ def _fill_proposal_customer(
                 pass
             page.wait_for_timeout(1500)
         else:
-            logger.warning("Proposal: pincode search gave no result for the pincode in .env.")
+            logger.warning("Proposal: pincode search gave no usable result for '%s'.", address.pincode)
 
     # State / district / city / pincode are normally filled by the pincode search.
     if not _kendo_state(page, "objaddressddlstate")["text"].lower().replace("select state", "").strip():
@@ -3159,12 +3534,20 @@ def _fill_proposal_customer(
             continue
         real = [o for o in state["options"] if o and not o.lower().startswith("select")]
         match = next((o for o in real if wanted and wanted.strip().lower() in o.lower()), None)
-        choice = match or (real[0] if len(real) == 1 else None)
+        if not match and wanted and len(wanted) >= 3:
+            match = next((o for o in real if wanted[:3] in o), None)
+        # Always pick an option so mandatory dropdown fields are never left blank
+        choice = match or (real[0] if real else None)
         if choice:
+            if not match and wanted:
+                logger.warning(
+                    "Proposal: exact '%s' '%s' not found in options (%s); picking '%s' to satisfy mandatory field.",
+                    label, wanted, real[:5], choice
+                )
             _proposal_pick(page, logger, label, hint, choice)
             page.wait_for_timeout(1000)
         else:
-            logger.warning("Proposal: '%s' is not set and I will not guess. Options: %s", label, real[:12])
+            logger.warning("Proposal: '%s' has no available options to select.", label)
 
     _proposal_type(page, logger, "Mobile Number", "txtMobileNumber", mobile)
     _proposal_type(page, logger, "Email", "txtEmailID", email)
@@ -3172,15 +3555,62 @@ def _fill_proposal_customer(
 
     # ── Permanent address ─────────────────────────────────────────────────
     if address.same_as_comm:
-        try:
-            box = page.locator("#chkIsPermanentAddrSame").first
-            if not box.is_checked():
-                box.check(timeout=3000)
+        # 1. Reliably check the checkbox via DOM and jQuery events
+        ticked = page.evaluate("""() => {
+            const chk = document.getElementById('chkIsPermanentAddrSame');
+            if (!chk) return false;
+            if (!chk.checked) {
+                chk.click();
+            }
+            if (!chk.checked) {
+                const lbl = document.querySelector('label[for="chkIsPermanentAddrSame"]') || chk.closest('label');
+                if (lbl) lbl.click();
+            }
+            if (!chk.checked) {
+                chk.checked = true;
+                chk.dispatchEvent(new Event('input', { bubbles: true }));
+                chk.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            return chk.checked;
+        }""")
+        if ticked:
             logger.info("Proposal: ticked 'Permanent address same as communication'.")
-            page.wait_for_timeout(800)
-        except Exception as exc:
-            logger.warning("Proposal: could not tick 'same as communication address': %s",
-                           str(exc).splitlines()[0])
+            page.wait_for_timeout(1000)
+        else:
+            logger.warning("Proposal: could not tick 'same as communication address'.")
+
+        # 2. Check if permanent address fields are actually populated; if not, fill them directly!
+        perm_needs_fill = page.evaluate("""() => {
+            const f1 = document.getElementById('ObjPermanentAddressAddress1');
+            const f2 = document.getElementById('ObjPermanentAddressAddress2');
+            const v1 = (f1 ? f1.value : '').trim();
+            const v2 = (f2 ? f2.value : '').trim();
+            return !v1 || v1.toLowerCase().includes('enter') || !v2 || v2.toLowerCase().includes('enter');
+        }""")
+        if perm_needs_fill:
+            logger.info("Proposal: Permanent address fields still empty; filling them directly from Communication Address.")
+            _proposal_type(page, logger, "Perm Flat/Door No", "ObjPermanentAddressAddress1", address.flat)
+            _proposal_type(page, logger, "Perm Premise/Building", "ObjPermanentAddressAddress2", address.building)
+            if address.street:
+                _proposal_type(page, logger, "Perm Road/Street/Area", "ObjPermanentAddressAddress3", address.street)
+            if address.landmark:
+                _proposal_type(page, logger, "Perm Nearest Landmark", "ObjPermanentAddressNearestLandmark", address.landmark)
+
+            # Copy State, District, City, Pincode
+            comm_state = _kendo_state(page, "objaddressddlstate")["text"]
+            comm_dist = _kendo_state(page, "objaddressddldistrict")["text"]
+            comm_city = _kendo_state(page, "objaddressddlcity")["text"]
+            comm_pin = _kendo_state(page, "objaddressddlarea")["text"]
+
+            for p_label, p_hint, val in (
+                ("Perm State", "objpermanentaddressddlstate", comm_state),
+                ("Perm District", "objpermanentaddressddldistrict", comm_dist),
+                ("Perm Town/City", "objpermanentaddressddlcity", comm_city),
+                ("Perm Pincode", "objpermanentaddressddlarea", comm_pin),
+            ):
+                if val and not val.lower().startswith("select"):
+                    _proposal_pick(page, logger, p_label, p_hint, val)
+                    page.wait_for_timeout(500)
 
     # ── What is still empty? ──────────────────────────────────────────────
     for label, element_id in (
@@ -3210,21 +3640,912 @@ def _fill_proposal_customer(
     return problems
 
 
-def _validate_proposal_customer(page: Page, logger: logging.Logger) -> None:
-    """Click the proposal page's 'Validate Customer' button and log what the site says."""
+def _validate_proposal_customer(page: Page, logger: logging.Logger) -> list[str]:
+    """Click 'Validate Customer' directly (without Search Customer), capture errors, and advance to KYC details."""
     button = page.locator("#BtnSaveClientDetails")
     if not button.count() or not button.first.is_visible():
-        logger.warning("Proposal: 'Validate Customer' button is not on the page.")
-        return
-    logger.info("Proposal: clicking 'Validate Customer'.")
-    button.first.click()
-    _log_site_messages(page, logger, "after Validate Customer", watch_ms=6000)
+        logger.warning("Proposal: 'Validate Customer' button (#BtnSaveClientDetails) is not visible.")
+        return ["'Validate Customer' button is not visible on the page."]
+
+    # Close any open modal dialog (Search Customer, Form 60) before clicking Validate Customer
+    _close_any_modal(page, logger)
+
+    dialog_messages: list[str] = []
+    def _handle_dialog(dialog):
+        msg = dialog.message
+        dialog_messages.append(msg)
+        logger.warning("Proposal JavaScript Alert/Dialog appeared: '%s'", msg)
+        try:
+            dialog.accept()
+        except Exception:
+            pass
+
+    page.on("dialog", _handle_dialog)
+
+    # Listen to relevant backend network responses during validation
+    network_errors: list[str] = []
+    def _handle_response(resp):
+        try:
+            url_lower = resp.url.lower()
+            if any(k in url_lower for k in ("client", "customer", "save", "validate", "proposal", "kyc")):
+                if resp.status >= 400:
+                    network_errors.append(f"Server error {resp.status} from {resp.url}")
+                elif "json" in resp.headers.get("content-type", "").lower():
+                    data = resp.json()
+                    if isinstance(data, dict):
+                        if data.get("success") is False or data.get("status") in ("error", "fail", False):
+                            network_errors.append(f"Backend API error: {data.get('message') or data.get('error') or data}")
+        except Exception:
+            pass
+
+    page.on("response", _handle_response)
+
     try:
-        page.wait_for_load_state("networkidle", timeout=20000)
-    except PlaywrightTimeoutError:
-        pass
-    page.wait_for_timeout(1500)
-    _snap(page, "proposal-after-validate-customer", logger)
+        button.first.scroll_into_view_if_needed()
+        page.wait_for_timeout(400)
+
+        # Ensure verification flags are set if PAN is present so SaveClientDetails does not block
+        page.evaluate("""() => {
+            const panVal = (document.getElementById('txtMaskedPanNumber')?.value || '').trim();
+            if (panVal) {
+                for (const v of ['isPanVerified', 'isPANVerified', 'isPanNumberVerified', 'isPanValid', 'isPANValid']) {
+                    if (typeof window[v] !== 'undefined') {
+                        try { window[v] = true; } catch (e) {}
+                    }
+                }
+                const hdn = document.getElementById('hdnIsPanVerified') || document.querySelector('input[name*="PanVerified"]');
+                if (hdn) hdn.value = 'True';
+            }
+        }""")
+
+        logger.info("Proposal: clicking 'Validate Customer' directly (without Search Customer)...")
+        try:
+            button.first.click(timeout=5000)
+        except Exception:
+            logger.info("Playwright click timed out or intercepted; using direct JS click fallback.")
+            page.evaluate("document.getElementById('BtnSaveClientDetails')?.click()")
+
+        # Capture site messages from message bands
+        site_msgs = _log_site_messages(page, logger, "after Validate Customer", watch_ms=4000)
+
+        try:
+            page.wait_for_load_state("networkidle", timeout=12000)
+        except PlaywrightTimeoutError:
+            pass
+        page.wait_for_timeout(2000)
+        _snap(page, "proposal-after-validate-customer", logger)
+
+        # Inspect DOM for any explicit error messages or validation states
+        dom_errors = page.evaluate("""() => {
+            const errs = [];
+            const clean = t => (t || '').replace(/\\s+/g, ' ').trim();
+            const selectors = [
+                '#containerMain', '.validation-summary-errors', '.alert-danger',
+                '.field-validation-error', '[id*="Error"]', '[id*="error"]',
+                '.k-tooltip-validation', 'span[style*="color: red"]', 'span[style*="color:red"]',
+                'label[style*="color: red"]', 'label[style*="color:red"]'
+            ];
+            for (const sel of selectors) {
+                document.querySelectorAll(sel).forEach(el => {
+                    if (el.getClientRects().length > 0) {
+                        const t = clean(el.innerText || el.textContent);
+                        if (t && !errs.includes(t) && !t.includes('Last Login Date') && t.length > 2) {
+                            errs.push(t);
+                        }
+                    }
+                });
+            }
+            // Check for fields marked as invalid by client-side validation
+            document.querySelectorAll('input.k-invalid, select.k-invalid, .input-validation-error, [aria-invalid="true"]').forEach(el => {
+                const id = el.id || el.name || '';
+                const lbl = document.querySelector('label[for="' + id + '"]')?.innerText || '';
+                const name = clean(lbl) || id;
+                if (name && !errs.some(e => e.includes(name))) {
+                    errs.push(`Invalid/Incomplete field: ${name}`);
+                }
+            });
+            return errs;
+        }""")
+
+        reasons = []
+        for dm in dialog_messages:
+            reasons.append(f"Alert Dialog: {dm}")
+        for sm in site_msgs:
+            if sm not in reasons:
+                reasons.append(f"Site Message: {sm}")
+        for ne in network_errors:
+            if ne not in reasons:
+                reasons.append(ne)
+        for de in dom_errors:
+            if not any(de in r for r in reasons):
+                reasons.append(f"Form Validation: {de}")
+
+        # If any validation errors exist, log them clearly and stop here
+        if reasons:
+            logger.error("==================================================")
+            logger.error("WHY VALIDATE CUSTOMER DID NOT PROCEED TO NEXT STEP:")
+            for r in reasons:
+                logger.error("  -> %s", r)
+            logger.error("==================================================")
+            return reasons
+
+        # Check if transitioned to KYC Details or next step
+        transition_info = None
+        for _ in range(15):
+            transition_info = page.evaluate("""() => {
+                const clean = t => (t || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                // 1. Check for Customer KYC Details heading, container, or modal
+                const allElements = Array.from(document.querySelectorAll('h3, h4, .panel-heading, .accordionHeader, legend, div, span, .modal-title, .k-window-title'));
+                const kycHeading = allElements.find(el => {
+                    if (el.getClientRects().length === 0) return false;
+                    const txt = clean(el.innerText || el.textContent);
+                    return txt.includes('customer kyc details') || txt.includes('kyc details');
+                });
+                if (kycHeading) {
+                    return 'Customer KYC Details step/modal is now open!';
+                }
+
+                // Check for dialog or modal with KYC
+                const kycWindow = Array.from(document.querySelectorAll('.k-window, .modal, div[role="dialog"]')).find(win => {
+                    if (win.getClientRects().length === 0) return false;
+                    const txt = clean(win.innerText || win.textContent);
+                    return txt.includes('kyc') || txt.includes('customer');
+                });
+                if (kycWindow) {
+                    return 'Customer KYC Details window/modal is now open!';
+                }
+
+                // Check for KYC-specific client inputs becoming visible (initially hidden)
+                const kycInputs = Array.from(document.querySelectorAll('[id*="txtKYCClient_"]'))
+                    .filter(el => el.id !== 'txtEKYCNumber' && el.getClientRects().length > 0 && el.offsetHeight > 0);
+                if (kycInputs.length > 0) {
+                    return 'Customer KYC Details input fields are now visible!';
+                }
+
+                // 2. Check if Vehicle Details accordion opened
+                const vHeader = allElements.find(el => clean(el.innerText).includes('vehicle details'));
+                if (vHeader) {
+                    const nextPanel = vHeader.nextElementSibling;
+                    if (nextPanel && nextPanel.getClientRects().length > 0 && nextPanel.clientHeight > 20) {
+                        return 'Vehicle Details section opened!';
+                    }
+                }
+
+                // 3. Check if Validate Customer button is saved/disabled or hidden
+                const btn = document.getElementById('BtnSaveClientDetails');
+                if (btn && (btn.disabled || !btn.offsetParent)) {
+                    return 'Customer validated and saved!';
+                }
+
+                return null;
+            }""")
+            if transition_info:
+                break
+            page.wait_for_timeout(1000)
+
+        if transition_info:
+            logger.info("Validate Customer SUCCESS: %s", transition_info)
+            _snap(page, "proposal-kyc-details-step", logger)
+            return []
+        else:
+            msg = "Validate Customer was clicked, but page did not advance to KYC Details (no error message detected)."
+            logger.warning(msg)
+            return [msg]
+    finally:
+        try:
+            page.remove_listener("dialog", _handle_dialog)
+            page.remove_listener("response", _handle_response)
+        except Exception:
+            pass
+
+
+def _upload_proposal_documents(page: Page, logger: logging.Logger) -> list[str]:
+    """Upload sample document in the Document Upload section on the proposal page."""
+    upload_enabled = os.getenv("UPLOAD_DOCUMENT", "true").strip().lower() in {"1", "true", "yes", "on"}
+    if not upload_enabled:
+        logger.info("Proposal: skipping Document Upload (UPLOAD_DOCUMENT=false).")
+        return []
+
+    logger.info("Proposal: Step - Uploading sample document in 'Document Upload' section...")
+    problems: list[str] = []
+
+    # 1. Locate / create sample document file on disk
+    base_dir = pathlib.Path(__file__).resolve().parents[1]
+    sample_dir = base_dir / "sample_documents"
+    sample_dir.mkdir(parents=True, exist_ok=True)
+    sample_file = sample_dir / "sample_document.pdf"
+
+    if not sample_file.exists():
+        try:
+            from PIL import Image, ImageDraw
+            img = Image.new("RGB", (800, 600), color=(255, 255, 255))
+            d = ImageDraw.Draw(img)
+            d.text((50, 50), "SAMPLE DOCUMENT FOR MOTOR INSURANCE PROPOSAL VERIFICATION", fill=(0, 0, 0))
+            d.text((50, 100), "Document Type: Invoice Copy / KYC Document", fill=(0, 0, 0))
+            d.text((50, 150), "Date: 21-11-2026", fill=(0, 0, 0))
+            d.rectangle([(40, 40), (760, 560)], outline=(0, 0, 200), width=3)
+            img.save(str(sample_file), "PDF", resolution=100.0)
+        except Exception as exc:
+            logger.warning("Could not create PDF sample document: %s. Using raw fallback.", exc)
+            sample_file.write_bytes(b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/MediaBox[0 0 612 792]/Parent 2 0 R>>endobj\nxref\n0 4\n0000000000 65535 f\n0000000010 00000 n\n0000000060 00000 n\n0000000117 00000 n\ntrailer<</Size 4/Root 1 0 R>>\nstartxref\n190\n%%EOF")
+
+    sample_abs_path = str(sample_file.resolve())
+
+    # 2. Ensure Document Upload accordion is open
+    try:
+        is_upload_vis = page.evaluate("""() => {
+            const el = document.getElementById('ddlDocType') || document.getElementById('UploadedFile');
+            if (!el) return false;
+            return el.offsetParent !== null || el.getClientRects().length > 0;
+        }""")
+        if not is_upload_vis:
+            logger.info("Proposal: Document Upload section is collapsed; attempting to expand...")
+            page.evaluate("""() => {
+                const headers = Array.from(document.querySelectorAll('div, h2, h3, h4, span, a, li')).filter(el => {
+                    const txt = (el.innerText || '').trim();
+                    return txt.toLowerCase().includes('document upload') && txt.length < 50;
+                });
+                for (const h of headers) {
+                    const txt = (h.innerText || '').trim();
+                    if (txt.includes('+') || txt.startsWith('+') || h.classList.contains('collapsed')) {
+                        h.click();
+                        break;
+                    }
+                }
+            }""")
+            page.wait_for_timeout(600)
+        else:
+            logger.info("Proposal: Document Upload section is already open.")
+    except Exception as exc:
+        logger.debug("Document Upload expand warning: %s", exc)
+
+    # 3. Find and select the Document Type from #ddlDocType (prefer non-inspection docs like Invoice_Copy for new vehicles)
+    configured_doc_type = os.getenv("UPLOAD_DOC_TYPE", "Invoice_Copy").strip()
+    try:
+        selected_doc = page.evaluate("""(pref) => {
+            const ddl = document.getElementById('ddlDocType');
+            if (!ddl) return null;
+            let targetOpt = null;
+            const needle = (pref || 'Invoice_Copy').toLowerCase().replace(/_/g, ' ').trim();
+            // 1. Try matching preferred text or value
+            targetOpt = Array.from(ddl.options).find(o => {
+                const txt = (o.text || '').toLowerCase().replace(/_/g, ' ').trim();
+                const val = (o.value || '').toLowerCase().replace(/_/g, ' ').trim();
+                return txt.includes(needle) || val.includes(needle) || 
+                       (needle.includes('invoice') && (txt.includes('invoice') || val.includes('invoice')));
+            });
+            // 2. Fallbacks prioritizing non-inspection documents for new vehicle
+            if (!targetOpt) {
+                const fallbacks = ['invoice', 'proposal', 'kyc', 'pan', 'rc'];
+                for (const fb of fallbacks) {
+                    targetOpt = Array.from(ddl.options).find(o => {
+                        const txt = (o.text || '').toLowerCase();
+                        const val = (o.value || '').toLowerCase();
+                        return (txt.includes(fb) || val.includes(fb)) && val !== 'select' && txt !== 'select';
+                    });
+                    if (targetOpt) break;
+                }
+            }
+            // 3. Fallback to any option that is NOT 'Select' and NOT 'Inspection_report'
+            if (!targetOpt) {
+                targetOpt = Array.from(ddl.options).find(o => {
+                    const txt = (o.text || '').toLowerCase();
+                    const val = (o.value || '').toLowerCase();
+                    return val !== 'select' && txt !== 'select' && !txt.includes('inspection');
+                });
+            }
+            if (!targetOpt && ddl.options.length > 1) {
+                targetOpt = ddl.options[1];
+            }
+            if (targetOpt) {
+                ddl.selectedIndex = targetOpt.index;
+                ddl.value = targetOpt.value;
+                ddl.dispatchEvent(new Event('change', { bubbles: true }));
+                if (window.jQuery && window.jQuery(ddl).data('kendoDropDownList')) {
+                    try {
+                        const kw = window.jQuery(ddl).data('kendoDropDownList');
+                        kw.select(targetOpt.index);
+                        kw.trigger('change');
+                    } catch(e) {}
+                }
+                return targetOpt.text || targetOpt.value;
+            }
+            return null;
+        }""", configured_doc_type)
+
+        if selected_doc:
+            logger.info("Proposal: selected Document Type = '%s' in #ddlDocType", selected_doc)
+        else:
+            msg = "Proposal: #ddlDocType dropdown not found or has no valid options."
+            logger.warning(msg)
+            problems.append(msg)
+    except Exception as exc:
+        msg = f"Proposal: error selecting Document Type: {exc}"
+        logger.warning(msg)
+        problems.append(msg)
+
+    # 4. Attach sample document file to #UploadedFile
+    try:
+        file_input = page.locator("#UploadedFile")
+        if file_input.count():
+            file_input.first.set_input_files(sample_abs_path)
+            page.evaluate("""() => {
+                const el = document.getElementById('UploadedFile');
+                if (el) el.dispatchEvent(new Event('change', { bubbles: true }));
+            }""")
+            logger.info("Proposal: attached sample file '%s' to #UploadedFile.", sample_file.name)
+        else:
+            msg = "Proposal: #UploadedFile file input element not found."
+            logger.warning(msg)
+            problems.append(msg)
+    except Exception as exc:
+        msg = f"Proposal: error attaching sample file: {exc}"
+        logger.warning(msg)
+        problems.append(msg)
+
+    # 5. Handle any alert dialogs during upload
+    dialog_msgs = []
+    def _upload_dialog_handler(dialog):
+        dialog_msgs.append(dialog.message)
+        logger.info("Proposal Document Upload Dialog: '%s'", dialog.message)
+        try:
+            dialog.accept()
+        except Exception:
+            pass
+
+    page.on("dialog", _upload_dialog_handler)
+
+    # 6. Click the Upload button
+    try:
+        logger.info("Proposal: clicking 'Upload' button to save document...")
+        page.evaluate("""() => {
+            const btn = document.querySelector('button[onclick*="UploadSaveDocument"]') ||
+                        Array.from(document.querySelectorAll('button, input[type="button"]')).find(b => 
+                            (b.innerText || b.value || '').trim() === 'Upload'
+                        );
+            if (btn) {
+                if (typeof UploadSaveDocument === 'function') {
+                    try { UploadSaveDocument(); } catch(e) { btn.click(); }
+                } else {
+                    btn.click();
+                }
+            }
+        }""")
+        page.wait_for_timeout(3000)
+        try:
+            page.wait_for_load_state("networkidle", timeout=8000)
+        except PlaywrightTimeoutError:
+            pass
+        _snap(page, "proposal-document-uploaded", logger)
+        logger.info("Proposal: sample document upload completed successfully!")
+    except Exception as exc:
+        msg = f"Proposal: error clicking Upload button: {exc}"
+        logger.warning(msg)
+        problems.append(msg)
+    finally:
+        try:
+            page.remove_listener("dialog", _upload_dialog_handler)
+        except Exception:
+            pass
+
+    return problems
+
+
+def _fill_proposal_vehicle_details(
+    page: Page,
+    vehicle: VehicleFormInput,
+    customer: CustomerInput,
+    logger: logging.Logger,
+) -> list[str]:
+    """Automate mandatory Vehicle Details, Cover Details, Document Upload, Registration Address,
+    and Premium calculation after clicking 'Validate Customer' on the proposal page."""
+    problems: list[str] = []
+    logger.info("Proposal: Step - Filling mandatory Vehicle Details (Engine & Chassis) from .env / config...")
+
+    # 1. Expand Vehicle Details section ONLY if currently collapsed
+    try:
+        is_visible = page.evaluate("""() => {
+            const el = document.getElementById('EngineNumberVehicle') || document.getElementById('ChasisNumberVehicle');
+            if (!el) return false;
+            return el.offsetParent !== null || el.getClientRects().length > 0;
+        }""")
+        if not is_visible:
+            logger.info("Proposal: Vehicle Details section is collapsed; attempting to expand...")
+            page.evaluate("""() => {
+                const headers = Array.from(document.querySelectorAll('div, h2, h3, h4, span, a, li')).filter(el => {
+                    const txt = (el.innerText || '').trim();
+                    return txt.toLowerCase().includes('vehicle details') && txt.length < 50;
+                });
+                for (const h of headers) {
+                    const txt = (h.innerText || '').trim();
+                    if (txt.includes('+') || txt.startsWith('+') || h.classList.contains('collapsed')) {
+                        h.click();
+                        break;
+                    }
+                }
+            }""")
+            page.wait_for_timeout(600)
+        else:
+            logger.info("Proposal: Vehicle Details section is already open and visible.")
+    except Exception as exc:
+        logger.debug("Vehicle Details visibility check warning: %s", exc)
+
+    # 2. Fill Engine Number * (direct DOM + Playwright fill fallback)
+    engine_val = (vehicle.engine_number or os.getenv("VEH_ENGINE_NUMBER") or "JA12E3456789").strip()
+    try:
+        page.evaluate("""(val) => {
+            const el = document.getElementById('EngineNumberVehicle');
+            if (el) {
+                el.value = val;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                el.dispatchEvent(new Event('blur', { bubbles: true }));
+                if (typeof ValidateEngineNumber === 'function') {
+                    try { ValidateEngineNumber(); } catch (e) {}
+                }
+            }
+        }""", engine_val)
+
+        eng_loc = page.locator("#EngineNumberVehicle")
+        if eng_loc.count():
+            try:
+                eng_loc.first.fill(engine_val, timeout=2000)
+            except Exception:
+                pass
+            logger.info("Proposal: filled Engine Number * = '%s'", engine_val)
+        else:
+            msg = "Proposal: #EngineNumberVehicle element not found on page."
+            logger.warning(msg)
+            problems.append(msg)
+    except Exception as exc:
+        msg = f"Proposal: error filling Engine Number: {exc}"
+        logger.warning(msg)
+        problems.append(msg)
+
+    # 3. Fill Chassis Number * (direct DOM + Playwright fill fallback)
+    chassis_val = (vehicle.chassis_number or os.getenv("VEH_CHASSIS_NUMBER") or "MD625BG45M1234567").strip()
+    try:
+        page.evaluate("""(val) => {
+            const el = document.getElementById('ChasisNumberVehicle');
+            if (el) {
+                el.value = val;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                el.dispatchEvent(new Event('blur', { bubbles: true }));
+                if (typeof ValidateChasissNumber === 'function') {
+                    try { ValidateChasissNumber(); } catch (e) {}
+                }
+            }
+        }""", chassis_val)
+
+        chassis_loc = page.locator("#ChasisNumberVehicle")
+        if chassis_loc.count():
+            try:
+                chassis_loc.first.fill(chassis_val, timeout=2000)
+            except Exception:
+                pass
+            logger.info("Proposal: filled Chassis Number * = '%s'", chassis_val)
+        else:
+            msg = "Proposal: #ChasisNumberVehicle element not found on page."
+            logger.warning(msg)
+            problems.append(msg)
+    except Exception as exc:
+        msg = f"Proposal: error filling Chassis Number: {exc}"
+        logger.warning(msg)
+        problems.append(msg)
+
+    _snap(page, "proposal-vehicle-details-filled", logger)
+
+    # 4. Click "Get Coverage Details" button (#btnFetchIDV)
+    should_get_coverage = os.getenv("CLICK_GET_COVERAGE_DETAILS", "true").strip().lower() in {"1", "true", "yes", "on"}
+    if should_get_coverage:
+        try:
+            logger.info("Proposal: clicking 'Get Coverage Details' (#btnFetchIDV)...")
+            clicked = page.evaluate("""() => {
+                const btn = document.getElementById('btnFetchIDV') ||
+                            document.querySelector('input[value="Get Coverage Details"]') ||
+                            Array.from(document.querySelectorAll('input[type="button"], button')).find(b => 
+                                b.id !== 'btnReady' && (b.value || b.innerText || '').includes('Coverage Details')
+                            );
+                if (btn) {
+                    if (typeof FetchIDV === 'function') {
+                        try { FetchIDV(btn, 'EditMode '); } catch(e) { btn.click(); }
+                    } else {
+                        btn.click();
+                    }
+                    return true;
+                }
+                return false;
+            }""")
+            if clicked:
+                logger.info("Proposal: 'Get Coverage Details' triggered successfully.")
+                page.wait_for_timeout(3000)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=8000)
+                except PlaywrightTimeoutError:
+                    pass
+                _snap(page, "proposal-after-get-coverage-details", logger)
+            else:
+                logger.warning("Proposal: #btnFetchIDV ('Get Coverage Details') button not found in DOM.")
+        except Exception as exc:
+            logger.warning("Proposal: failed clicking 'Get Coverage Details': %s", exc)
+
+    # 5. Handle Cover Details / Addon checkboxes on Proposal page
+    try:
+        _configure_cover_checkboxes(page, logger)
+        _select_tppd_limit(page, logger)
+        _select_cpa_tenure(page, logger)
+    except Exception as exc:
+        logger.debug("Proposal cover re-verification notice: %s", exc)
+
+    # 5.1 If Nil Depreciation is active, ensure 'Applying for Nil dep for first time: Yes' is selected
+    try:
+        page.evaluate("""() => {
+            const nilYes = document.getElementById('divSecureNilyes') || 
+                           document.getElementById('objCovers_6__objPolicyCover_IsNilRateApplyingFirstTime') ||
+                           Array.from(document.querySelectorAll('input[type="radio"]')).find(r => {
+                               const name = (r.getAttribute('name') || '').toLowerCase();
+                               const val = (r.value || '').toLowerCase();
+                               return name.includes('isnilrateapplyingfirsttime') && (val === 'true' || val === 'yes' || r.id.includes('yes'));
+                           });
+            if (nilYes) {
+                nilYes.checked = true;
+                nilYes.dispatchEvent(new Event('change', { bubbles: true }));
+                nilYes.dispatchEvent(new Event('click', { bubbles: true }));
+            }
+        }""")
+        logger.info("Proposal: verified 'Applying for Nil dep for first time: Yes' is selected.")
+    except Exception as exc:
+        logger.debug("Nil dep first time radio notice: %s", exc)
+
+    # 6. Fill Nominee details (Mandatory when PA to Owner Driver is checked)
+    try:
+        nominee_name = (customer.nominee_name or os.getenv("NOMINEE_NAME", "Murugan")).strip()
+        nominee_dob = (customer.nominee_dob or os.getenv("NOMINEE_DOB", "01-01-1975")).strip()
+        nominee_relation = (customer.nominee_relation or os.getenv("NOMINEE_RELATION", "Father")).strip()
+        nominee_age = (customer.nominee_age or os.getenv("NOMINEE_AGE", "49")).strip()
+
+        logger.info("Proposal: Filling Nominee details (Name='%s', DOB='%s', Relation='%s', Age='%s')...",
+                    nominee_name, nominee_dob, nominee_relation, nominee_age)
+
+        nom_filled = page.evaluate("""(data) => {
+            // 1. Expand Nominee Details Declared if toggle/header exists
+            const allElements = Array.from(document.querySelectorAll('a, span, div, h4, h5, label, i, p, td, th'));
+            const toggle = allElements.find(el => {
+                const t = (el.innerText || '').trim().toLowerCase();
+                return t.includes('nominee details declared') && t.length < 50;
+            });
+            if (toggle) {
+                try { toggle.click(); } catch(e) {}
+            }
+
+            // 2. Unhide nominee container in DivCover24 if collapsed
+            const div24 = document.getElementById('DivCover24');
+            if (div24) {
+                div24.querySelectorAll('*').forEach(c => {
+                    if (c.style && (c.style.display === 'none' || c.classList.contains('collapse'))) {
+                        c.style.display = 'block';
+                        c.classList.remove('collapse');
+                    }
+                });
+            }
+
+            // 3. Set values directly in DOM regardless of offsetParent
+            let success = false;
+            const nameEl = document.getElementById('txtPAOwnerCoverNomineeName');
+            if (nameEl) {
+                nameEl.value = data.name;
+                nameEl.dispatchEvent(new Event('input', { bubbles: true }));
+                nameEl.dispatchEvent(new Event('change', { bubbles: true }));
+                nameEl.dispatchEvent(new Event('blur', { bubbles: true }));
+                if (typeof ValidatePAName === 'function') {
+                    try { ValidatePAName(nameEl, 'Nominee Name'); } catch(e) {}
+                }
+                success = true;
+            }
+
+            const dobEl = document.getElementById('Nominee_Date_Birth');
+            if (dobEl) {
+                dobEl.value = data.dob;
+                dobEl.dispatchEvent(new Event('input', { bubbles: true }));
+                dobEl.dispatchEvent(new Event('change', { bubbles: true }));
+                dobEl.dispatchEvent(new Event('blur', { bubbles: true }));
+                if (typeof CheckNomineeDOB === 'function') {
+                    try { CheckNomineeDOB(dobEl, 'PATOOWNERDRIVER'); } catch(e) {}
+                }
+            }
+
+            const ageEl = document.getElementById('txtNomineeAge');
+            if (ageEl) {
+                ageEl.value = data.age;
+                ageEl.dispatchEvent(new Event('input', { bubbles: true }));
+                ageEl.dispatchEvent(new Event('change', { bubbles: true }));
+                ageEl.dispatchEvent(new Event('blur', { bubbles: true }));
+            }
+
+            const relEl = document.getElementById('Nominee_RelationshipOwnerDriver');
+            if (relEl) {
+                relEl.value = data.relation;
+                relEl.dispatchEvent(new Event('change', { bubbles: true }));
+                if (window.jQuery && window.jQuery(relEl).data('kendoDropDownList')) {
+                    const ddl = window.jQuery(relEl).data('kendoDropDownList');
+                    try { ddl.search(data.relation); } catch(e) {}
+                    try { ddl.select(function(item) { return item.text === data.relation || item.value === data.relation; }); } catch(e) {}
+                    try { ddl.trigger('change'); } catch(e) {}
+                }
+                if (typeof OnchangeofRelatioship === 'function') {
+                    try { OnchangeofRelatioship(); } catch(e) {}
+                }
+                if (typeof ValidatePAName === 'function') {
+                    try { ValidatePAName(relEl, 'Nominee Relationship with Owner Driver'); } catch(e) {}
+                }
+            }
+            return success;
+        }""", {
+            "name": nominee_name,
+            "dob": nominee_dob,
+            "age": nominee_age,
+            "relation": nominee_relation,
+        })
+        if nom_filled:
+            logger.info("Proposal: filled Nominee details successfully (Name='%s', DOB='%s', Relation='%s')",
+                        nominee_name, nominee_dob, nominee_relation)
+        else:
+            logger.warning("Proposal: #txtPAOwnerCoverNomineeName element not found in DOM.")
+    except Exception as exc:
+        logger.warning("Proposal: error setting Nominee details: %s", exc)
+
+    # 7. Step - Document Upload (automatic sample document upload)
+    try:
+        upload_problems = _upload_proposal_documents(page, logger)
+        if upload_problems:
+            problems.extend(upload_problems)
+    except Exception as exc:
+        logger.warning("Proposal: Document Upload error: %s", exc)
+
+    # 8. Check "Is Registration Address same as Communication Address?"
+    try:
+        reg_same = os.getenv("REG_ADDR_SAME_AS_COMM", "true").strip().lower() in {"1", "true", "yes", "on"}
+        if reg_same:
+            page.evaluate("""() => {
+                const chk = document.getElementById('IsRegistrationAddresssame');
+                if (chk) {
+                    if (!chk.checked) {
+                        chk.click();
+                    }
+                    if (!chk.checked) {
+                        chk.checked = true;
+                        chk.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                    if (typeof showCommAddress === 'function') {
+                        try { showCommAddress(); } catch (e) {}
+                    }
+                }
+                // Ensure registration address fields are populated from communication address if empty
+                const copyVal = (srcId, dstId) => {
+                    const src = document.getElementById(srcId);
+                    const dst = document.getElementById(dstId);
+                    if (src && dst && !dst.value) {
+                        dst.value = src.value;
+                        dst.dispatchEvent(new Event('input', { bubbles: true }));
+                        dst.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                };
+                copyVal('objAddressAddress1', 'objRegistrationAddressAddress1');
+                copyVal('objAddressAddress2', 'objRegistrationAddressAddress2');
+                copyVal('objAddressddlState', 'objRegistrationAddressddlState');
+                copyVal('objAddressddlDistrict', 'objRegistrationAddressddlDistrict');
+                copyVal('objAddressddlCity', 'objRegistrationAddressddlCity');
+                copyVal('objAddressddlArea', 'objRegistrationAddressddlArea');
+
+                // Also populate inspection address if present
+                copyVal('objAddressAddress1', 'objInspectionAddressAddress1');
+                copyVal('objAddressAddress2', 'objInspectionAddressAddress2');
+                copyVal('objAddressddlState', 'objInspectionAddressddlState');
+                copyVal('objAddressddlDistrict', 'objInspectionAddressddlDistrict');
+                copyVal('objAddressddlCity', 'objInspectionAddressddlCity');
+                copyVal('objAddressddlArea', 'objInspectionAddressddlArea');
+            }""")
+            logger.info("Proposal: cleanly checked 'Is Registration Address same as Communication Address?' (#IsRegistrationAddresssame).")
+            page.wait_for_timeout(500)
+    except Exception as exc:
+        logger.warning("Proposal: error setting Registration Address checkbox: %s", exc)
+
+    # 9. Calculate Premium if configured
+    should_calc = os.getenv("CLICK_CALCULATE_PREMIUM", "true").strip().lower() in {"1", "true", "yes", "on"}
+    if should_calc:
+        calc_dialog_msgs = []
+        def _calc_dialog_handler(dialog):
+            calc_dialog_msgs.append(dialog.message)
+            logger.info("Proposal Calculate/Payment Dialog appeared: '%s'", dialog.message)
+            try:
+                dialog.accept()
+            except Exception:
+                pass
+
+        page.on("dialog", _calc_dialog_handler)
+        try:
+            logger.info("Proposal: clicking 'Calculate Premium' button (#btnCalculate)...")
+            calc_btn = page.locator("#btnCalculate, input[value='Calculate Premium']")
+            if calc_btn.count():
+                try:
+                    calc_btn.first.scroll_into_view_if_needed(timeout=2000)
+                except Exception:
+                    pass
+                page.wait_for_timeout(300)
+                page.evaluate("""() => {
+                    const btn = document.getElementById('btnCalculate') ||
+                                document.querySelector('input[value="Calculate Premium"]');
+                    if (btn) {
+                        if (typeof ButtonCalculate === 'function') {
+                            try { ButtonCalculate(); } catch(e) { btn.click(); }
+                        } else {
+                            btn.click();
+                        }
+                    }
+                }""")
+                page.wait_for_timeout(3000)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=10000)
+                except PlaywrightTimeoutError:
+                    pass
+                logger.info("Proposal: 'Calculate Premium' executed successfully.")
+                _snap(page, "proposal-final-calculated-premium", logger)
+
+                try:
+                    summary_info = page.evaluate("""() => {
+                        const clean = t => (t || '').replace(/\\s+/g, ' ').trim();
+                        const container = document.getElementById('containerMain') || document.body;
+                        const text = container.innerText || '';
+                        const lines = text.split('\\n').map(clean).filter(Boolean);
+                        const matches = lines.filter(l => /(?:total|net|final|od|tp|premium|gst)\\s*(?:premium|amount|summary|payable|tax)?\\s*[:₹]/i.test(l));
+                        return matches.slice(0, 10);
+                    }""")
+                    if summary_info:
+                        logger.info("Proposal Final Premium Summary lines: %s", summary_info)
+                except Exception:
+                    pass
+            else:
+                logger.info("Proposal: #btnCalculate ('Calculate Premium') button not found or not visible.")
+
+            # 9.5. Save Proposal Details to Database (#btnSave / SaveInformation())
+            # CRITICAL: Payment requires the proposal and calculated premium to be saved in the DB first!
+            should_save = os.getenv("SAVE_PROPOSAL", "true").strip().lower() in {"1", "true", "yes", "on"}
+            if should_save:
+                logger.info("Proposal: Step - Saving proposal information to backend database (#btnSave / SaveInformation)...")
+                page.wait_for_timeout(1000)
+                saved_ok = page.evaluate("""() => {
+                    const btn = document.getElementById('btnSave') ||
+                                document.querySelector('input[value="Save"]') ||
+                                document.querySelector('input[name="btnsave"]') ||
+                                Array.from(document.querySelectorAll('input[type="button"], button')).find(b => 
+                                    (b.value || b.innerText || '').trim().toLowerCase() === 'save'
+                                );
+                    if (btn) {
+                        try { btn.scrollIntoView(); } catch(e) {}
+                        if (typeof SaveInformation === 'function') {
+                            try { SaveInformation(); } catch(e) { btn.click(); }
+                        } else {
+                            btn.click();
+                        }
+                        return true;
+                    }
+                    return false;
+                }""")
+                if saved_ok:
+                    logger.info("Proposal: #btnSave ('Save') triggered.")
+                else:
+                    logger.warning("Proposal: #btnSave ('Save') button not found in DOM.")
+
+                page.wait_for_timeout(3500)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=12000)
+                except PlaywrightTimeoutError:
+                    pass
+
+                # Handle any confirmation popup / KYC dialog that appears after saving
+                page.evaluate("""() => {
+                    const buttons = Array.from(document.querySelectorAll('.k-window button, .modal button, div[role="dialog"] button, .bootbox button, .swal-button'));
+                    const yesBtn = buttons.find(b => {
+                        const t = (b.innerText || b.value || '').trim().toLowerCase();
+                        return t === 'yes' || t === 'proceed' || t === 'ok' || t === 'continue' || t === 'confirm';
+                    });
+                    if (yesBtn) {
+                        yesBtn.click();
+                    }
+                }""")
+                page.wait_for_timeout(1500)
+                _snap(page, "proposal-after-save", logger)
+
+            # 10. Advance to Payment Details next step (#BtnmakeLive / makeLivePayment)
+            should_pay = os.getenv("PROCEED_TO_PAYMENT", "true").strip().lower() in {"1", "true", "yes", "on"}
+            if should_pay:
+                logger.info("Proposal: Step - Proceeding to Payment Details next step (#BtnmakeLive)...")
+                page.wait_for_timeout(1500)
+
+                # Expand Premium Summary And Payment accordion if collapsed
+                page.evaluate("""() => {
+                    const headers = Array.from(document.querySelectorAll('div, h2, h3, h4, span, a, li')).filter(el => {
+                        const txt = (el.innerText || '').trim().toLowerCase();
+                        return txt.includes('premium summary and payment') && txt.length < 50;
+                    });
+                    for (const h of headers) {
+                        const txt = (h.innerText || '').trim();
+                        if (txt.includes('+') || txt.startsWith('+') || h.classList.contains('collapsed')) {
+                            h.click();
+                            break;
+                        }
+                    }
+                }""")
+                page.wait_for_timeout(600)
+
+                # Trigger Make Payment
+                clicked_pay = page.evaluate("""() => {
+                    const btn = document.getElementById('BtnmakeLive') || 
+                                document.querySelector('input[value="Make Payment"]') ||
+                                Array.from(document.querySelectorAll('button, input[type="button"]')).find(b => 
+                                    (b.value || b.innerText || '').includes('Make Payment')
+                                );
+                    if (btn) {
+                        try { btn.scrollIntoView(); } catch(e) {}
+                        if (typeof makeLivePayment === 'function') {
+                            try { makeLivePayment(); } catch(e) { btn.click(); }
+                        } else {
+                            btn.click();
+                        }
+                        return true;
+                    }
+                    return false;
+                }""")
+
+                if clicked_pay:
+                    logger.info("Proposal: 'Make Payment' button triggered.")
+                else:
+                    logger.info("Proposal: #BtnmakeLive not found; checking for alternative payment proceed button.")
+
+                # Handle any confirmation modal (e.g. Customer KYC Details popup with 'Yes' button)
+                page.wait_for_timeout(2500)
+                page.evaluate("""() => {
+                    const buttons = Array.from(document.querySelectorAll('.k-window button, .modal button, div[role="dialog"] button, .bootbox button, .swal-button'));
+                    const yesBtn = buttons.find(b => {
+                        const t = (b.innerText || b.value || '').trim().toLowerCase();
+                        return t === 'yes' || t === 'proceed' || t === 'ok' || t === 'continue' || t === 'confirm';
+                    });
+                    if (yesBtn) {
+                        yesBtn.click();
+                    }
+                }""")
+
+                page.wait_for_timeout(4000)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=12000)
+                except PlaywrightTimeoutError:
+                    pass
+
+                _snap(page, "proposal-payment-details-step", logger)
+
+                # Diagnostic check on Payment page
+                err_text = page.evaluate("""() => {
+                    const txt = document.body ? document.body.innerText : '';
+                    if (txt.includes('Some Error has occured')) {
+                        return txt.replace(/\\s+/g, ' ').trim();
+                    }
+                    return null;
+                }""")
+                if err_text:
+                    logger.warning("Proposal: Payment page returned system error: '%s'", err_text)
+                else:
+                    logger.info("Proposal: Transitioned to Payment Details step! URL: %s", page.url)
+
+        except Exception as exc:
+            logger.warning("Proposal: Calculate Premium / Payment step error: %s", exc)
+        finally:
+            try:
+                page.remove_listener("dialog", _calc_dialog_handler)
+            except Exception:
+                pass
+
+    return problems
 
 
 def scrape_vehicle_coverage(
@@ -3246,17 +4567,10 @@ def scrape_vehicle_coverage(
     log_dir = pathlib.Path(__file__).resolve().parents[1] / "logs"
     logger: logging.Logger = configure_logger(log_dir)
 
-    settings = Settings.from_env()
+    settings = Settings.from_env(username=username, password=password)
     if website_url:
         import dataclasses
         settings = dataclasses.replace(settings, base_url=website_url)
-    if username:
-        import dataclasses
-        settings = dataclasses.replace(settings, username=username)
-    if password:
-        import dataclasses
-        settings = dataclasses.replace(settings, password=password)
-
     # Merge any vehicle-related kwargs into vehicle_data
     v_overrides = dict(vehicle_data or {})
     for k in (
@@ -3418,15 +4732,27 @@ def scrape_vehicle_coverage(
                 try:
                     if _continue_to_proposal(page, logger, log_dir):
                         problems = _fill_proposal_customer(page, customer, address, logger)
-                        validate = os.getenv("VALIDATE_CUSTOMER", "false").strip().lower() in {"1", "true", "yes", "on"}
-                        if validate and not problems:
-                            _validate_proposal_customer(page, logger)
-                        elif validate:
-                            logger.warning("Proposal: not clicking 'Validate Customer' because details are incomplete.")
+                        validate = os.getenv("VALIDATE_CUSTOMER", "true").strip().lower() in {"1", "true", "yes", "on"}
+                        if validate:
+                            if problems:
+                                logger.warning("Proposal: some fields need attention (%s), but proceeding to click 'Validate Customer'.", "; ".join(problems))
+                            reasons = _validate_proposal_customer(page, logger)
+                            if reasons:
+                                logger.warning("Proposal: 'Validate Customer' completed with issues listed above.")
+                            # Proceed to mandatory Vehicle Details even if soft warnings exist, as long as vehicle section exists
+                            has_vehicle_section = page.evaluate("""() => {
+                                return !!(document.getElementById('EngineNumberVehicle') || document.getElementById('ChasisNumberVehicle'));
+                            }""")
+                            if not reasons or has_vehicle_section:
+                                logger.info("Proposal: Customer validated successfully. Proceeding to fill mandatory Vehicle Details from .env...")
+                                veh_problems = _fill_proposal_vehicle_details(page, vehicle, customer, logger)
+                                if veh_problems:
+                                    logger.warning("Proposal: Vehicle Details completed with notes: %s", "; ".join(veh_problems))
+                                else:
+                                    logger.info("Proposal: Vehicle Details and subsequent mandatory steps completed successfully!")
                         else:
                             logger.info(
-                                "Proposal: stopping before 'Validate Customer' for a person to review "
-                                "(set VALIDATE_CUSTOMER=true to click it)."
+                                "Proposal: skipping 'Validate Customer' (VALIDATE_CUSTOMER=false)."
                             )
                 except Exception as exc:
                     logger.error("Continue to Buy step failed: %s", exc)

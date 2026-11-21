@@ -25,6 +25,7 @@ from api.service import (
     allowed_hosts_are_configured,
     credential_fingerprint,
     get_api_logger,
+    get_scrape_website_url,
     load_scraper_callable,
     run_scraper,
     scraper_is_configured,
@@ -56,8 +57,9 @@ def start_scrape(
 ) -> ScrapeAccepted:
     """Queue an existing scraper function in a background worker."""
     logger = get_api_logger()
-    website_url = str(payload.website_url)
+    website_url = ""
     try:
+        website_url = get_scrape_website_url()
         validate_target_url(website_url)
         scraper = load_scraper_callable()
     except ScraperNotConfiguredError as exc:
@@ -92,34 +94,17 @@ def start_scrape(
 
     manager: TaskManager = request.app.state.task_manager
     password = payload.password.get_secret_value()
-    extra_data = payload.model_dump(
-        exclude={
-            "website_url", "username", "password", "scrape_type",
-            "vehicle", "cover", "customer", "address",
-        },
-        exclude_none=True,
-    )
-    vehicle_data = payload.vehicle.model_dump(exclude_none=True) if payload.vehicle else {}
-    cover_data = payload.cover.model_dump(exclude_none=True) if payload.cover else {}
-    customer_data = payload.customer.model_dump(exclude_none=True) if payload.customer else {}
-    address_data = payload.address.model_dump(exclude_none=True) if payload.address else {}
-
     work = partial(
         run_scraper,
         scraper,
         website_url,
         payload.username,
         password,
-        payload.scrape_type,
-        vehicle_data=vehicle_data,
-        cover_data=cover_data,
-        customer_data=customer_data,
-        address_data=address_data,
-        **extra_data,
+        "full",
     )
     submission = manager.submit(
         website_url,
-        payload.scrape_type,
+        "full",
         work,
         dedupe_token=credential_fingerprint(payload.username, password),
     )

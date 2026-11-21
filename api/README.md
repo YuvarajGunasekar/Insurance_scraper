@@ -1,6 +1,9 @@
 # Scraping Trigger API
 
-This API is a separate integration layer. The current workspace contains a login Page Object but no reusable website-scraping entry-point function, so the API does not invoke the login flow. Configure `SCRAPER_CALLABLE` to point to an existing authorized scraper before submitting jobs. Until then, health checks work and `POST /api/scrape` returns HTTP 503 with a configuration message.
+This API uses the existing authorized vehicle scraper when `SCRAPER_CALLABLE`
+is configured. The scrape target URL comes from `BASE_URL`; vehicle, cover,
+customer, and address values are read from the project `.env` by the scraper.
+Only the username and password are supplied in the `POST /api/scrape` body.
 
 For interactive sign-in, the API also provides a separate manual-CAPTCHA login
 workflow. It opens a visible browser, fills URL and credentials from the request,
@@ -20,7 +23,9 @@ scrape(
 )
 ```
 
-Set `SCRAPER_CALLABLE` to `python.module:function_name`. For example, for an existing `collect.py` module with a `scrape` function, use `collect:scrape`. The API does not create, change, or wrap the implementation. If the existing callable has a different interface, do not point this API at the login workflow; provide a dedicated adapter as a new module or request approval to change an existing file.
+Set `SCRAPER_CALLABLE` to `python.module:function_name`. The existing vehicle
+scraper can be selected with
+`SCRAPER_CALLABLE=scrapers.vehicle_scraper:scrape_vehicle_coverage`.
 
 ## Install and run (PowerShell)
 
@@ -28,12 +33,16 @@ From the project directory:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements-api.txt
-$env:SCRAPER_CALLABLE = "python.module:function_name"
-$env:API_ALLOWED_HOSTS = "allowed.example,another-allowed.example"
+.\.venv\Scripts\python.exe -m playwright install chromium
 .\.venv\Scripts\python.exe -m uvicorn api.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-Use exact hostnames in `API_ALLOWED_HOSTS`. Only HTTPS URLs on those hosts are accepted. Private and non-public IP addresses, embedded URL credentials, and unlisted hosts are rejected. Keep the API bound to `127.0.0.1`; this local API has no caller authentication and must not be exposed to an untrusted network.
+Set `BASE_URL`, `SCRAPER_CALLABLE`, and `API_ALLOWED_HOSTS` in `.env`.
+`API_ALLOWED_HOSTS` must contain the exact hostname from `BASE_URL`. Only HTTPS
+URLs on those hosts are accepted. Private and non-public IP addresses,
+embedded URL credentials, and unlisted hosts are rejected. Keep the API bound
+to `127.0.0.1`; this local API has no caller authentication and must not be
+exposed to an untrusted network.
 
 ## Endpoints
 
@@ -64,17 +73,16 @@ Request:
 
 ```json
 {
-  "website_url": "https://allowed.example/path",
   "username": "authorized-test-user",
-  "password": "your-secret-password",
-  "scrape_type": "full"
+  "password": "your-secret-password"
 }
 ```
 
 Credentials are passed only to the configured callable. They are not written
 to task status, application logs, or API response models. Keep requests local;
 validation errors also omit submitted values. Do not expose this unauthenticated
-API to a network.
+API to a network. The target URL comes from `BASE_URL`; the scraper reads its
+vehicle/customer settings from `.env`.
 
 Accepted response (`202`):
 

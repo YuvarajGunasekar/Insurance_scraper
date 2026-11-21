@@ -15,8 +15,11 @@ from logging.handlers import RotatingFileHandler
 from secrets import token_bytes
 from urllib.parse import urlsplit
 
+from dotenv import dotenv_values
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+ENV_FILE = PROJECT_ROOT / ".env"
 LOGGER_NAME = "scrape_api"
 _DEDUPE_SALT = token_bytes(32)
 
@@ -31,6 +34,14 @@ class ScraperConfigurationError(RuntimeError):
 
 class TargetNotAllowedError(ValueError):
     """Raised when a requested URL is outside the configured host allowlist."""
+
+
+def _config_value(name: str) -> str:
+    """Read a setting from the process environment or project .env file."""
+    value = os.getenv(name)
+    if value is not None:
+        return value.strip()
+    return (dotenv_values(ENV_FILE).get(name) or "").strip()
 
 
 def get_api_logger() -> logging.Logger:
@@ -61,12 +72,22 @@ def get_api_logger() -> logging.Logger:
 
 def scraper_is_configured() -> bool:
     """Return whether the existing scraper callable has an import path set."""
-    return bool(os.getenv("SCRAPER_CALLABLE", "").strip())
+    return bool(_config_value("SCRAPER_CALLABLE"))
 
 
 def allowed_hosts_are_configured() -> bool:
     """Return whether API URL restrictions have been explicitly configured."""
     return bool(_allowed_hosts())
+
+
+def get_scrape_website_url() -> str:
+    """Read the scrape target URL from BASE_URL in the project configuration."""
+    website_url = _config_value("BASE_URL")
+    if not website_url:
+        raise ScraperNotConfiguredError(
+            "BASE_URL is required. Set it in the project .env file."
+        )
+    return website_url
 
 
 def validate_target_url(website_url: str) -> str:
@@ -99,7 +120,7 @@ def validate_target_url(website_url: str) -> str:
 
 def load_scraper_callable():
     """Load an existing callable configured as `python.module:function_name`."""
-    import_path = os.getenv("SCRAPER_CALLABLE", "").strip()
+    import_path = _config_value("SCRAPER_CALLABLE")
     if not import_path:
         raise ScraperNotConfiguredError(
             "No scraper entry point exists in this project. Configure "
@@ -182,6 +203,6 @@ def credential_fingerprint(username: str, password: str) -> str:
 def _allowed_hosts() -> set[str]:
     return {
         host.strip().rstrip(".").lower()
-        for host in os.getenv("API_ALLOWED_HOSTS", "").split(",")
+        for host in _config_value("API_ALLOWED_HOSTS").split(",")
         if host.strip()
     }

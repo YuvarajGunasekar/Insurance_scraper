@@ -72,15 +72,19 @@ class Settings:
     allow_manual_captcha_fallback: bool = True
 
     @classmethod
-    def from_env(cls) -> Settings:
+    def from_env(
+        cls, *, username: str | None = None, password: str | None = None
+    ) -> Settings:
         """Read configuration from environment variables and the project .env."""
         base_url = _required("BASE_URL")
         parsed_url = urlparse(base_url)
         if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
             raise ConfigurationError("BASE_URL must be an absolute http:// or https:// URL.")
 
-        username = _required("USERNAME")
-        password = _required("PASSWORD")
+        username = _required("USERNAME") if username is None else username.strip()
+        password = _required("PASSWORD") if password is None else password
+        if not username or not password:
+            raise ConfigurationError("USERNAME and PASSWORD are required.")
         if username.lower().startswith("your-") or password.lower().startswith("replace-"):
             raise ConfigurationError(
                 "Replace the sample USERNAME and PASSWORD values in .env with an authorized test account."
@@ -148,10 +152,17 @@ class Settings:
 
         headless = _get_bool("HEADLESS", False)
         captcha_selector = os.getenv("CAPTCHA_SELECTOR", "").strip() or None
+        # OCR-based CAPTCHA solving works in headless mode too; only warn if
+        # manual fallback is enabled but the browser is invisible.
         if captcha_selector and headless:
-            raise ConfigurationError(
-                "Set HEADLESS=false when CAPTCHA_SELECTOR is configured so you can enter the CAPTCHA manually."
-            )
+            allow_manual = _get_bool("ALLOW_MANUAL_CAPTCHA_FALLBACK", True)
+            if allow_manual:
+                import logging as _logging
+                _logging.getLogger(__name__).info(
+                    "CAPTCHA_SELECTOR is set with HEADLESS=true. "
+                    "OCR will solve the CAPTCHA automatically; manual fallback "
+                    "is enabled but will not work without a visible browser."
+                )
 
         return cls(
             base_url=base_url,
