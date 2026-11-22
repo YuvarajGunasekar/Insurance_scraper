@@ -6,6 +6,8 @@ from functools import partial
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, status
+import psycopg2
+import psycopg2.extras
 
 from api.schemas import (
     HealthResponse,
@@ -15,8 +17,16 @@ from api.schemas import (
     LoginResponse,
     LoginStatusResponse,
     ScrapeAccepted,
+    ScrapeInputCreate,
+    ScrapeInputResponse,
     ScrapeRequest,
     ScrapeStatusResponse,
+)
+from db.scrape_input_client import (
+    get_latest_scrape_input,
+    get_scrape_input_by_id,
+    list_scrape_inputs,
+    save_scrape_input,
 )
 from api.service import (
     ScraperConfigurationError,
@@ -251,3 +261,183 @@ def login_status(task_id: UUID, request: Request) -> LoginStatusResponse:
         login_succeeded=task.login_succeeded,
         error=task.error,
     )
+
+
+
+# ---------------------------------------------------------------------------
+# scrape-input CRUD — manage the DB rows that drive the scraper
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/scrape-input",
+    response_model=ScrapeInputResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_scrape_input(payload: ScrapeInputCreate) -> ScrapeInputResponse:
+    """Create a new scrape_input row (future scrapes read from the latest active row)."""
+    data = payload.model_dump()
+    new_id = save_scrape_input(data)
+    row = get_scrape_input_by_id(new_id)
+    if row is None:
+        raise HTTPException(status_code=500, detail="Failed to retrieve created row.")
+    return ScrapeInputResponse(**row)
+
+
+@router.get("/scrape-input/latest", response_model=ScrapeInputResponse)
+def get_latest_scrape_input_route() -> ScrapeInputResponse:
+    """Return the most-recently-created active scrape_input row."""
+    row = get_latest_scrape_input()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No active scrape_input row found. POST to /api/scrape-input to create one.",
+        )
+    return ScrapeInputResponse(**row)
+
+
+@router.get("/scrape-input/{input_id}", response_model=ScrapeInputResponse)
+def get_scrape_input_by_id_route(input_id: int) -> ScrapeInputResponse:
+    """Return a specific scrape_input row by id."""
+    row = get_scrape_input_by_id(input_id)
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"scrape_input id={input_id} not found.",
+        )
+    return ScrapeInputResponse(**row)
+
+
+@router.get("/scrape-input", response_model=list[ScrapeInputResponse])
+def list_scrape_inputs_route(limit: int = 20) -> list[ScrapeInputResponse]:
+    """List recent scrape_input rows (newest first)."""
+    rows = list_scrape_inputs(limit=limit)
+    return [ScrapeInputResponse(**r) for r in rows]
+
+
+@router.patch("/scrape-input/{input_id}/activate", response_model=ScrapeInputResponse)
+def activate_scrape_input(input_id: int) -> ScrapeInputResponse:
+    """Set is_active=TRUE for a quote so the scraper will use it next run."""
+    import psycopg2
+    from db.scrape_input_client import _pg_config
+    try:
+        conn = psycopg2.connect(**_pg_config())
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE insurance_quote SET is_active=TRUE, updated_at=NOW() WHERE id=%s RETURNING id;",
+            (input_id,),
+        )
+        if cur.fetchone() is None:
+            conn.rollback()
+            conn.close()
+            raise HTTPException(status_code=404, detail=f"Quote id={input_id} not found.")
+        conn.commit()
+        conn.close()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    row = get_scrape_input_by_id(input_id)
+    return ScrapeInputResponse(**row)
+
+
+# ---------------------------------------------------------------------------
+# /api/scrape-session — structured (nested) endpoint for normalized schema
+# ---------------------------------------------------------------------------
+from api.schemas import ScrapeSessionCreate
+
+
+@router.post(
+    "/scrape-session",
+    response_model=ScrapeInputResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_scrape_session(payload: ScrapeSessionCreate) -> ScrapeInputResponse:
+    """
+    Create a new scrape session using the structured (normalized) format.
+
+    Accepts a nested JSON body with sub-objects for vehicle, covers, customer,
+    address, and flow. Internally stored across 6 normalized DB tables linked
+    by foreign keys. Returns the same response as POST /api/scrape-input.
+    """
+    flat_data = payload.to_flat()
+    new_id = save_scrape_input(flat_data)
+    row = get_scrape_input_by_id(new_id)
+    if row is None:
+        raise HTTPException(status_code=500, detail="Failed to retrieve created session.")
+    return ScrapeInputResponse(**row)
+
+
+# ---------------------------------------------------------------------------
+# Relational Quotes API — inspect the 7 normalized tables connected by FK
+# ---------------------------------------------------------------------------
+@router.get("/quotes")
+def list_insurance_quotes(limit: int = 20) -> list[dict]:
+    """List scraped insurance quotes from the relational master table."""
+    from db.postgres_client import _get_conn
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT q.id, q.registration_number, q.policy_start_date, q.proposal_number,
+                       q.trace_id, q.business_type, q.scraped_at,
+                       v.make_model_variant, v.rto_location,
+                       p.total_premium, p.net_premium, p.idv
+                FROM insurance_quote q
+                LEFT JOIN vehicle_details v ON v.quote_id = q.id
+                LEFT JOIN premium_details p ON p.quote_id = q.id
+                ORDER BY q.scraped_at DESC
+                LIMIT %s;
+            """, (limit,))
+            return [dict(r) for r in cur.fetchall()]
+
+
+@router.get("/quotes/{quote_id}")
+def get_insurance_quote_complete(quote_id: int) -> dict:
+    """Get the full policy quote joined across all 7 relational tables."""
+    from db.postgres_client import _get_conn
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM v_complete_insurance_quote WHERE quote_id = %s;", (quote_id,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail=f"Insurance quote id={quote_id} not found.")
+            return dict(row)
+
+
+@router.get("/quotes/{quote_id}/sections")
+def get_insurance_quote_sections(quote_id: int) -> dict:
+    """Get the policy quote broken down into its individual form sections."""
+    from db.postgres_client import _get_conn
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM insurance_quote WHERE id = %s;", (quote_id,))
+            quote = cur.fetchone()
+            if not quote:
+                raise HTTPException(status_code=404, detail=f"Quote id={quote_id} not found.")
+
+            cur.execute("SELECT * FROM vehicle_details WHERE quote_id = %s;", (quote_id,))
+            vehicle = cur.fetchone()
+
+            cur.execute("SELECT * FROM cover_details WHERE quote_id = %s;", (quote_id,))
+            covers = cur.fetchone()
+
+            cur.execute("SELECT * FROM customer_details WHERE quote_id = %s;", (quote_id,))
+            customer = cur.fetchone()
+
+            cur.execute("SELECT * FROM nominee_details WHERE quote_id = %s;", (quote_id,))
+            nominee = cur.fetchone()
+
+            cur.execute("SELECT * FROM address_details WHERE quote_id = %s;", (quote_id,))
+            address = cur.fetchone()
+
+            cur.execute("SELECT * FROM premium_details WHERE quote_id = %s;", (quote_id,))
+            premium = cur.fetchone()
+
+            return {
+                "quote": dict(quote) if quote else None,
+                "vehicle_details": dict(vehicle) if vehicle else None,
+                "cover_details": dict(covers) if covers else None,
+                "customer_details": dict(customer) if customer else None,
+                "nominee_details": dict(nominee) if nominee else None,
+                "address_details": dict(address) if address else None,
+                "premium_details": dict(premium) if premium else None,
+            }

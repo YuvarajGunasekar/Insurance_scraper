@@ -8,7 +8,6 @@ import json
 import logging
 import os
 import re
-import tempfile
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -22,9 +21,25 @@ from config.settings import PROJECT_ROOT, Settings
 SESSION_FILE = PROJECT_ROOT / ".auth" / "session.json"
 
 # ---------------------------------------------------------------------------
-# CAPTCHA OCR helpers  (Tesseract + Pillow)
+# CAPTCHA OCR helpers  (ddddocr primary + Tesseract fallback)
 # ---------------------------------------------------------------------------
 _TESSERACT_CMD: str | None = None
+
+# Singleton ddddocr instance — loading the ONNX model once is expensive (~1 s).
+_DDDD_OCR_INSTANCE = None
+
+
+def _get_dddd_ocr():
+    """Return a cached ddddocr.DdddOcr instance, or None if not installed."""
+    global _DDDD_OCR_INSTANCE
+    if _DDDD_OCR_INSTANCE is not None:
+        return _DDDD_OCR_INSTANCE
+    try:
+        import ddddocr
+        _DDDD_OCR_INSTANCE = ddddocr.DdddOcr(show_ad=False)
+        return _DDDD_OCR_INSTANCE
+    except Exception:
+        return None
 
 
 def _find_tesseract() -> str:
@@ -50,27 +65,65 @@ def _find_tesseract() -> str:
     return _TESSERACT_CMD
 
 
+def _solve_with_ddddocr(image_bytes: bytes, logger: logging.Logger) -> str:
+    """Use ddddocr (deep-learning CAPTCHA solver) on raw PNG bytes.
+
+    ddddocr is specifically trained for distorted/noisy CAPTCHA images and
+    achieves much higher accuracy than Tesseract on this CAPTCHA style.
+    Returns an uppercase string, or '' on failure.
+    """
+    ocr = _get_dddd_ocr()
+    if ocr is None:
+        return ""
+    try:
+        result: str = ocr.classification(image_bytes)
+        # Normalize to uppercase letters only (the CAPTCHA is always A-Z)
+        cleaned = re.sub(r"[^A-Za-z]", "", result).upper()
+        if cleaned:
+            logger.info("ddddocr CAPTCHA result: '%s' (raw='%s')", cleaned, result)
+        return cleaned
+    except Exception as exc:
+        logger.warning("ddddocr failed: %s", exc)
+        return ""
+
+
 def _ocr_captcha_image(image_bytes: bytes, logger: logging.Logger) -> str:
-    """Run optimized Tesseract OCR on raw PNG bytes for 1st-attempt CAPTCHA capture.
+    """Solve a CAPTCHA image using ddddocr (primary) then Tesseract (fallback).
+
+    Strategy:
+      1. ddddocr — deep-learning model trained on noisy/styled CAPTCHAs.
+         Returns immediately if it produces a 4-letter result (the expected
+         length for IndusInd SmartZone CAPTCHAs).
+      2. Tesseract multi-variant majority vote — used only when ddddocr
+         returns fewer than 4 letters (very rare).
 
     IndusInd SmartZone CAPTCHAs are always exactly 4 uppercase letters (A-Z).
-    Pre-processing pipeline:
-      1. Extract Red channel and Grayscale at 3× resolution (Red channel removes background noise).
-      2. Invert if background is dark; add white border padding (15px) to prevent edge clipping.
-      3. Generate multi-variant set (clean, contrast-enhanced, and adaptive thresholded).
-      4. Run OCR with PSM 6 (single block), PSM 7 (single line), and PSM 8 (single word)
-         using a strict uppercase-only whitelist (A-Z, no digits, no lowercase).
-      5. Majority-vote consensus: returns the most frequent 4-character uppercase code.
     """
+    # ── Stage 1: ddddocr (primary — fast, accurate on styled CAPTCHAs) ──────
+    dddd_result = _solve_with_ddddocr(image_bytes, logger)
+    if len(dddd_result) == 4:
+        return dddd_result
+
+    if dddd_result:
+        # ddddocr got something but not 4 chars — keep it as a fallback candidate
+        logger.info(
+            "ddddocr returned '%s' (%d chars, expected 4); trying Tesseract.",
+            dddd_result, len(dddd_result),
+        )
+    else:
+        logger.info("ddddocr returned empty result; trying Tesseract.")
+
+    # ── Stage 2: Tesseract multi-variant majority vote (fallback) ────────────
     try:
         from collections import Counter
         from PIL import Image, ImageEnhance, ImageOps
         import pytesseract
+        import numpy as np
     except ImportError as exc:
-        logger.error(
-            "Pillow or pytesseract is not installed. "
-            "Install them with: pip install Pillow pytesseract"
-        )
+        logger.error("Pillow or pytesseract is not installed.")
+        # If we have a partial ddddocr result, use it rather than failing
+        if dddd_result:
+            return dddd_result
         raise RuntimeError("CAPTCHA OCR dependencies missing") from exc
 
     pytesseract.pytesseract.tesseract_cmd = _find_tesseract()
@@ -80,15 +133,14 @@ def _ocr_captcha_image(image_bytes: bytes, logger: logging.Logger) -> str:
         raw_img = raw_img.convert("RGB")
 
     w, h = raw_img.size
-    # 1. Scale up 3× with bicubic interpolation
+    # Scale up 3× with bicubic interpolation for Tesseract
     scaled = raw_img.resize((w * 3, h * 3), Image.BICUBIC)
 
-    # 2. Extract Red channel (best glyph isolation on IndusInd) and Grayscale
+    # Extract Red channel (best glyph isolation on IndusInd) and Grayscale
     r, _, _ = scaled.split()
     gray = scaled.convert("L")
 
     # Invert if the background is dark
-    import numpy as np
     if np.mean(np.array(r)) < 127:
         r = ImageOps.invert(r)
     if np.mean(np.array(gray)) < 127:
@@ -102,7 +154,7 @@ def _ocr_captcha_image(image_bytes: bytes, logger: logging.Logger) -> str:
     except Exception:
         pass
 
-    # 3. Create high-confidence padded variants
+    # Create high-confidence padded variants
     pad_px = 15
     padded_r = ImageOps.expand(r, border=pad_px, fill="white")
     padded_gray = ImageOps.expand(gray, border=pad_px, fill="white")
@@ -124,12 +176,11 @@ def _ocr_captcha_image(image_bytes: bytes, logger: logging.Logger) -> str:
         ("gray", padded_gray),
     ]
 
-    # Strict uppercase whitelist — IndusInd CAPTCHAs are exclusively letters A-Z
     _WHITELIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     configs = [
-        f"--oem 3 --psm 6 -c tessedit_char_whitelist={_WHITELIST}",   # single uniform block
-        f"--oem 3 --psm 7 -c tessedit_char_whitelist={_WHITELIST}",   # single text line
-        f"--oem 3 --psm 8 -c tessedit_char_whitelist={_WHITELIST}",   # single word
+        f"--oem 3 --psm 6 -c tessedit_char_whitelist={_WHITELIST}",
+        f"--oem 3 --psm 7 -c tessedit_char_whitelist={_WHITELIST}",
+        f"--oem 3 --psm 8 -c tessedit_char_whitelist={_WHITELIST}",
     ]
 
     candidates_4char: list[str] = []
@@ -148,35 +199,35 @@ def _ocr_captcha_image(image_bytes: bytes, logger: logging.Logger) -> str:
                 candidates_4char.append(cleaned)
                 counts = Counter(candidates_4char)
                 top, freq = counts.most_common(1)[0]
-                # High-confidence early consensus: 2 matching 4-character readings
                 if freq >= 2:
                     logger.info(
-                        "CAPTCHA OCR 1st-attempt consensus result: '%s' (freq=%d/%d, variant=%s, psm=%s)",
+                        "CAPTCHA Tesseract consensus: '%s' (freq=%d/%d, variant=%s, psm=%s)",
                         top, freq, len(candidates_4char), v_name, psm,
                     )
                     return top
 
-    # Fallback 1: Most common 4-character result if any was seen
+    # Tesseract fallback: most common 4-char result
     if candidates_4char:
         counts = Counter(candidates_4char)
         top, freq = counts.most_common(1)[0]
         logger.info(
-            "CAPTCHA OCR result (4-char majority): '%s' (freq=%d/%d)",
+            "CAPTCHA Tesseract 4-char majority: '%s' (freq=%d/%d)",
             top, freq, len(candidates_4char),
         )
         return top
 
-    # Fallback 2: Most common non-empty result
+    # Last resort: use ddddocr partial result or any Tesseract text
+    if dddd_result:
+        logger.info("Using ddddocr partial result '%s' as last resort.", dddd_result)
+        return dddd_result
+
     if all_candidates:
         counts = Counter(all_candidates)
         top, freq = counts.most_common(1)[0]
-        logger.info(
-            "CAPTCHA OCR fallback result: '%s' (freq=%d/%d)",
-            top, freq, len(all_candidates),
-        )
+        logger.info("CAPTCHA Tesseract fallback: '%s' (freq=%d/%d)", top, freq, len(all_candidates))
         return top
 
-    logger.warning("CAPTCHA OCR produced no usable text across all variants.")
+    logger.warning("CAPTCHA OCR produced no usable text across all solvers.")
     return ""
 
 
@@ -228,8 +279,13 @@ class LoginPage:
     def open(self) -> None:
         """Navigate to the configured login page."""
         self.logger.info("Opening configured login page.")
-        self.page.goto(self.settings.base_url, wait_until="domcontentloaded")
-        self.page.locator(self.settings.username_selector).wait_for(state="visible")
+        timeout = getattr(self.settings, "navigation_timeout_ms", 60000)
+        try:
+            self.page.goto(self.settings.base_url, wait_until="domcontentloaded", timeout=timeout)
+        except PlaywrightTimeoutError:
+            self.logger.warning("domcontentloaded timed out navigating to login page; retrying with wait_until='commit'...")
+            self.page.goto(self.settings.base_url, wait_until="commit", timeout=timeout)
+        self.page.locator(self.settings.username_selector).wait_for(state="visible", timeout=timeout)
 
     # ------------------------------------------------------------------
     # Credentials
@@ -561,7 +617,11 @@ class LoginPage:
                 or os.getenv("VEHICLE_DETAILS_URL")
                 or self.settings.base_url
             )
-            self.page.goto(check_url, wait_until="domcontentloaded")
+            timeout = getattr(self.settings, "navigation_timeout_ms", 60000)
+            try:
+                self.page.goto(check_url, wait_until="domcontentloaded", timeout=timeout)
+            except PlaywrightTimeoutError:
+                self.page.goto(check_url, wait_until="commit", timeout=timeout)
             self.page.wait_for_timeout(1000)
             on_login_form = (
                 "IMDLogin" in self.page.url
@@ -592,8 +652,11 @@ class LoginPage:
         timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f")
         screenshot_path = self.screenshots_directory / f"login-{outcome}-{timestamp}.png"
         try:
-            self.page.screenshot(path=str(screenshot_path), full_page=True)
+            self.page.screenshot(path=str(screenshot_path), full_page=True, timeout=5000)
         except Exception:
-            self.logger.exception("Could not capture login screenshot.")
-            return None
+            try:
+                self.page.screenshot(path=str(screenshot_path), full_page=False, timeout=3000)
+            except Exception:
+                self.logger.warning("Could not capture login screenshot (timed out).")
+                return None
         return screenshot_path

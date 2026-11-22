@@ -102,7 +102,7 @@ class Settings:
         if timeout_ms <= 0:
             raise ConfigurationError("TIMEOUT_MS must be a positive integer.")
 
-        navigation_timeout_value = os.getenv("NAVIGATION_TIMEOUT_MS", "30000").strip()
+        navigation_timeout_value = os.getenv("NAVIGATION_TIMEOUT_MS", "60000").strip()
         try:
             navigation_timeout_ms = int(navigation_timeout_value)
         except ValueError as exc:

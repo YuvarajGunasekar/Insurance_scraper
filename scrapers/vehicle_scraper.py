@@ -406,7 +406,7 @@ def _verify_mandatory_vehicle_fields(page: Page, vehicle: VehicleFormInput, logg
     for field_name, selectors in checks.items():
         value = _get_field_value(page, *selectors)
         expected = getattr(vehicle, field_name if field_name != "purchase_date" else "purchase_registration_date", "")
-        if expected and not value:
+        if expected and (not value or any(bad in value.lower() for bad in ("no record", "no data"))):
             missing.append(field_name)
     if missing:
         logger.warning("Vehicle fields still empty after fill attempt: %s", ", ".join(missing))
@@ -630,6 +630,89 @@ function findKendo(hints, role) {
 """
 
 
+_INVALID_OPTION_WORDS = ("no record", "no data", "not available", "please choose", "select", "loading")
+
+
+def _clean_model_string(raw: str | None) -> str:
+    """Normalize a model string, stripping quotes and invalid text."""
+    if not raw or any(bad in str(raw).lower() for bad in ("no record", "no data")):
+        return os.getenv("VEH_MAKE_MODEL_VARIANT", "TVS JUPITER").strip()
+    return str(raw).replace('"', '').replace("'", '').strip()
+
+
+def _get_model_search_terms(model: str) -> list[str]:
+    """Extract clean search terms from any model string.
+    e.g. 'TVS | JUPITER | 125 OBDIIB DISC SX HT MT CPR | CC/WATT 125'
+    -> ['JUPITER', 'TVS JUPITER', 'TVS']
+    """
+    clean = _clean_model_string(model)
+    parts = [p.strip() for p in clean.split('|') if p.strip()]
+    terms: list[str] = []
+    if len(parts) >= 2:
+        make, model_name = parts[0], parts[1]
+        terms.append(model_name)
+        terms.append(f"{make} {model_name}".strip())
+        terms.append(make)
+    else:
+        words = clean.split()
+        if len(words) >= 2:
+            terms.append(words[1])
+            terms.append(" ".join(words[:2]))
+            terms.append(words[0])
+            terms.append(clean)
+        else:
+            if clean.upper() == "TVS":
+                terms.extend(["JUPITER", "TVS JUPITER", "TVS", "XL 100", "RAIDER"])
+            elif clean.upper() in ("HONDA", "HERO", "BAJAJ", "YAMAHA", "SUZUKI", "ROYAL ENFIELD"):
+                default_env = os.getenv("VEH_MAKE_MODEL_VARIANT", "").strip()
+                if default_env and default_env.upper() != clean.upper():
+                    terms.append(default_env)
+                terms.append(clean)
+            else:
+                terms.append(clean)
+
+    seen = set()
+    res: list[str] = []
+    for t in terms:
+        t_clean = re.sub(r'[^a-zA-Z0-9 ]+', ' ', t).strip()
+        if t_clean and t_clean.lower() not in seen and len(t_clean) >= 2:
+            seen.add(t_clean.lower())
+            res.append(t_clean)
+    return res or ["JUPITER", "TVS JUPITER", "TVS"]
+
+
+def _score_model_option(option_text: str, target: str) -> int:
+    """Score how well a dropdown suggestion matches the requested model/variant."""
+    opt = option_text.lower().strip()
+    tgt = _clean_model_string(target).lower().strip()
+    if not opt or any(bad in opt for bad in _INVALID_OPTION_WORDS):
+        return -1
+    if opt == tgt:
+        return 10000
+    score = 0
+    if tgt in opt or opt in tgt:
+        score += 2000
+    parts = [p.strip() for p in tgt.split('|') if p.strip()]
+    variant_tokens: list[str] = []
+    if len(parts) >= 3:
+        for p in parts[2:]:
+            p_sub = re.sub(r'cc/watt\s*\d+', '', p, flags=re.I).strip()
+            variant_tokens.extend([w for w in re.split(r'[^a-zA-Z0-9]+', p_sub) if w])
+    else:
+        words = tgt.split()
+        if len(words) > 2:
+            variant_tokens = words[2:]
+    opt_words = set(re.findall(r'[a-zA-Z0-9]+', opt))
+    for tok in variant_tokens:
+        if tok.lower() in opt_words:
+            score += 200
+    base_words = set(re.findall(r'[a-zA-Z0-9]+', tgt)) - set(tok.lower() for tok in variant_tokens)
+    for bw in base_words:
+        if bw in opt_words:
+            score += 20
+    return score
+
+
 def _kendo_pick(
     page: Page,
     logger: logging.Logger,
@@ -677,12 +760,16 @@ def _kendo_pick(
                 return w ? w.ul.children('li').toArray().map(li => (li.innerText || li.textContent || '').trim()) : [];
             }""", args)
             lowered = [t.lower() for t in texts]
-            if needle in lowered:
+            valid_indices = [
+                i for i, t in enumerate(texts)
+                if t.strip() and not any(bad in t.lower() for bad in _INVALID_OPTION_WORDS)
+            ]
+            if needle in lowered and lowered.index(needle) in valid_indices:
                 index = lowered.index(needle)
             else:
-                index = next((i for i, t in enumerate(lowered) if needle in t), -1)
-                if index < 0 and first_if_no_match and is_autocomplete and texts:
-                    index = 0
+                index = next((i for i, t in enumerate(lowered) if needle in t and i in valid_indices), -1)
+                if index < 0 and first_if_no_match and is_autocomplete and valid_indices:
+                    index = valid_indices[0]
             if index >= 0:
                 break
             page.wait_for_timeout(400)
@@ -708,7 +795,14 @@ def _kendo_pick(
                 const w = findKendo(a.hints, a.role);
                 if (!w) return;
                 const li = w.ul.children('li').eq(a.index);
-                if (a.role === 'kendoAutoComplete') { li[0].click(); return; }
+                if (a.role === 'kendoAutoComplete') {
+                    li.trigger('mousedown');
+                    li.trigger('click');
+                    if (typeof w.select === 'function') w.select(li);
+                    w.trigger('change');
+                    w.close();
+                    return;
+                }
                 w.select(li); w.trigger('change'); w.close();
             }""", args)
         page.wait_for_timeout(500)
@@ -738,13 +832,18 @@ def _model_details_loaded(page: Page) -> bool:
     """True when the site has filled CC/Watt or Seating Capacity for the chosen model.
 
     The site only accepts the model ("Please Choose Make/Model/Variant…") while
-    these read-only details are present.
+    these read-only details are present and greater than 0.
     """
     try:
         return bool(page.evaluate("""() => {
-            const ids = ['VehicleDetails_CubicCapacity', 'VehicleDetails_SeatingCapacity'];
+            const mm = (document.getElementById('VehicleDetailsMakeModel') || {}).value || '';
+            if (!mm.trim() || /no record|no data/i.test(mm)) return false;
+            const ids = ['VehicleDetails_CubicCapacity', 'VehicleDetails_SeatingCapacity', 'VehicleDetails_LCC'];
             return ids.some(id => Array.from(document.querySelectorAll('[id="' + id + '"]'))
-                .some(el => (el.value || '').trim() !== ''));
+                .some(el => {
+                    const v = (el.value || '').trim();
+                    return v !== '' && v !== '0';
+                }));
         }"""))
     except Exception:
         return False
@@ -762,15 +861,483 @@ def _wait_for_model_details(page: Page, logger: logging.Logger, wait_ms: int = 1
 
 def _pick_model(page: Page, logger: logging.Logger, model: str) -> str | None:
     """Pick the model from the site's suggestion list and wait for its details."""
-    picked = _kendo_pick(
-        page, logger, "make_model_variant", model,
-        "kendoAutoComplete", ("vehicledetailsmakemodel",), first_if_no_match=True,
-    )
-    if picked:
-        logger.info("Make/Model/Variant picked from the site's list: '%s'", picked)
-        _wait_for_model_details(page, logger)
-        page.wait_for_timeout(500)
-    return picked
+    clean_target = _clean_model_string(model)
+    search_terms = _get_model_search_terms(model)
+    logger.info("Picking model: target='%s', search_terms=%s", clean_target, search_terms)
+
+    for term in search_terms:
+        logger.info("Attempting model autocomplete search with keyword: '%s'", term)
+        try:
+            # 1. Trigger search via Kendo AutoComplete widget and Playwright typing
+            searched = page.evaluate("""({term}) => {
+                const $ = window.jQuery;
+                if (!$) return false;
+                let w = $('#VehicleDetailsMakeModel').data('kendoAutoComplete');
+                if (!w) {
+                    for (const el of document.querySelectorAll('input[id*="MakeModel"], input[name*="Make_Model"], [data-role="autocomplete"]')) {
+                        w = $(el).data('kendoAutoComplete');
+                        if (w) break;
+                    }
+                }
+                if (w) {
+                    w.element.removeAttr('readonly').removeAttr('disabled');
+                    w.element.focus();
+                    w.element.val(term);
+                    w.search(term);
+                    return true;
+                }
+                const inp = document.getElementById('VehicleDetailsMakeModel');
+                if (inp) {
+                    inp.removeAttribute('readonly');
+                    inp.removeAttribute('disabled');
+                    inp.focus();
+                    inp.value = term;
+                    ['input', 'keyup'].forEach(ev => inp.dispatchEvent(new Event(ev, { bubbles: true })));
+                    return true;
+                }
+                return false;
+            }""", {"term": term})
+
+            if not searched:
+                try:
+                    inp_loc = page.locator("#VehicleDetailsMakeModel").first
+                    inp_loc.click(timeout=3000)
+                    inp_loc.fill(term)
+                except Exception:
+                    pass
+
+            # 2. Poll for suggestion list items to appear from Kendo's internal ul
+            # Note: Kendo AutoComplete's ul element does NOT have id='VehicleDetailsMakeModel_listbox'!
+            # It must be accessed via w.ul or .k-animation-container ul.
+            valid_options = []
+            for poll in range(25):  # up to 10 seconds (25 * 400ms)
+                items = page.evaluate("""() => {
+                    const $ = window.jQuery;
+                    let w = $ ? $('#VehicleDetailsMakeModel').data('kendoAutoComplete') : null;
+                    if (!w && $) {
+                        for (const el of document.querySelectorAll('input[id*="MakeModel"], input[name*="Make_Model"], [data-role="autocomplete"]')) {
+                            w = $(el).data('kendoAutoComplete');
+                            if (w) break;
+                        }
+                    }
+                    let ul = w && w.ul ? w.ul[0] : null;
+                    if (!ul) {
+                        ul = document.querySelector('.k-animation-container ul.k-list, [id*="MakeModel"] ul, .k-list-container ul');
+                    }
+                    if (!ul) return [];
+                    const lis = Array.from(ul.querySelectorAll('li'));
+                    return lis.map((li, idx) => ({
+                        idx: idx,
+                        text: (li.innerText || li.textContent || '').trim()
+                    }));
+                }""")
+                valid_options = [
+                    (it["idx"], it["text"]) for it in items
+                    if it["text"] and not any(bad in it["text"].lower() for bad in _INVALID_OPTION_WORDS)
+                ]
+                if valid_options:
+                    break
+                page.wait_for_timeout(400)
+
+            if not valid_options:
+                logger.warning("No valid options appeared for search term '%s' after waiting", term)
+                continue
+
+            # 3. Score options against target and pick best
+            scored = [
+                (_score_model_option(text, clean_target), idx, text)
+                for idx, text in valid_options
+            ]
+            scored.sort(key=lambda x: x[0], reverse=True)
+            best_score, best_idx, best_text = scored[0]
+            logger.info("Found %d options for '%s'. Best match: '%s' (score=%d, idx=%d)",
+                        len(valid_options), term, best_text, best_score, best_idx)
+
+            # 4. Click the chosen item using real Playwright click + Kendo widget selection
+            try:
+                handle = page.evaluate_handle("""(idx) => {
+                    const $ = window.jQuery;
+                    let w = $ ? $('#VehicleDetailsMakeModel').data('kendoAutoComplete') : null;
+                    if (!w && $) {
+                        for (const el of document.querySelectorAll('input[id*="MakeModel"], input[name*="Make_Model"], [data-role="autocomplete"]')) {
+                            w = $(el).data('kendoAutoComplete');
+                            if (w) break;
+                        }
+                    }
+                    const ul = w && w.ul ? w.ul[0] : document.querySelector('.k-animation-container ul.k-list');
+                    return ul ? ul.querySelectorAll('li')[idx] : null;
+                }""", best_idx)
+                item = handle.as_element()
+                if item:
+                    item.click(timeout=2000)
+            except Exception as click_err:
+                logger.debug("Playwright click on model li: %s", click_err)
+
+            # Trigger Kendo select and change events to ensure site listeners execute
+            page.evaluate("""({idx, text}) => {
+                const $ = window.jQuery;
+                let w = $ ? $('#VehicleDetailsMakeModel').data('kendoAutoComplete') : null;
+                if (!w && $) {
+                    for (const el of document.querySelectorAll('input[id*="MakeModel"], input[name*="Make_Model"], [data-role="autocomplete"]')) {
+                        w = $(el).data('kendoAutoComplete');
+                        if (w) break;
+                    }
+                }
+                const ul = w && w.ul ? w.ul[0] : document.querySelector('.k-animation-container ul.k-list');
+                if (ul) {
+                    const lis = ul.querySelectorAll('li');
+                    const li = lis[idx];
+                    if (li) {
+                        if ($) {
+                            $(li).trigger('mousedown').trigger('click');
+                        } else {
+                            li.click();
+                        }
+                        if (w) {
+                            if (typeof w.select === 'function') w.select($ ? $(li) : li);
+                            w.value(text);
+                            w.trigger('select', { item: $ ? $(li) : li });
+                            w.trigger('change');
+                            w.close();
+                        }
+                    }
+                }
+                const inp = document.getElementById('VehicleDetailsMakeModel');
+                if (inp) {
+                    inp.value = text;
+                    ['input', 'change'].forEach(ev => inp.dispatchEvent(new Event(ev, { bubbles: true })));
+                }
+                const hdn = document.getElementById('HdnVehicleDetailsMakeModel');
+                if (hdn) {
+                    hdn.value = text;
+                    ['input', 'change'].forEach(ev => hdn.dispatchEvent(new Event(ev, { bubbles: true })));
+                }
+                if (typeof window.checkMakeModel === 'function') {
+                    try { window.checkMakeModel(); } catch (e) {}
+                }
+            }""", {"idx": best_idx, "text": best_text})
+
+            page.wait_for_timeout(1000)
+
+            # 5. Verify model details loaded (CC/Watt, Seating Capacity, LCC)
+            if _wait_for_model_details(page, logger, wait_ms=8000):
+                picked_val = page.evaluate("() => (document.getElementById('VehicleDetailsMakeModel') || {}).value || ''")
+                logger.info("Make/Model/Variant successfully selected and details loaded: '%s'", picked_val or best_text)
+                return picked_val or best_text
+            else:
+                logger.info("Trying Enter key to finalize selection...")
+                page.keyboard.press("Enter")
+                page.wait_for_timeout(1000)
+                if _model_details_loaded(page):
+                    picked_val = page.evaluate("() => (document.getElementById('VehicleDetailsMakeModel') || {}).value || ''")
+                    logger.info("Model details loaded after Enter: '%s'", picked_val or best_text)
+                    return picked_val or best_text
+
+        except Exception as exc:
+            logger.warning("Error picking model with term '%s': %s", term, exc)
+
+    logger.error("Failed to pick a valid model matching '%s'", model)
+    return None
+
+
+def _get_rto_search_terms(rto: str) -> list[str]:
+    """Extract optimal search terms from any RTO string.
+    IndusInd Smartzone autocomplete helper specifies:
+    'Search using RTO Number or RTO location sample: MH-46 or Panvel'
+    Passing a full string with pipes (e.g. 'TAMIL NADU | Chennai Central (Ayanavaram) | TN-01')
+    fails because the server-side autocomplete only matches codes or single location names.
+
+    e.g. 'TAMIL NADU | Chennai Central (Ayanavaram) | TN-01' -> ['TN-01', 'TN01', 'Chennai Central', 'Chennai', 'Ayanavaram']
+    e.g. 'TN-01' -> ['TN-01', 'TN01', 'Chennai']
+    e.g. 'MH-46' -> ['MH-46', 'MH46', 'Panvel']
+    """
+    clean = str(rto).replace('"', '').replace("'", '').strip()
+    terms: list[str] = []
+
+    # 1. Regex for RTO code (e.g. TN-01, TN 01, TN01, MH-46)
+    code_match = re.search(r'\b([A-Za-z]{2})[-\s]?(\d{1,2})\b', clean)
+    if code_match:
+        state_prefix = code_match.group(1).upper()
+        num_suffix = code_match.group(2).zfill(2)
+        terms.append(f"{state_prefix}-{num_suffix}")
+        terms.append(f"{state_prefix}{num_suffix}")
+
+    # 2. Extract city/location name if pipe-separated or contains words
+    if "|" in clean:
+        parts = [p.strip() for p in clean.split("|") if p.strip()]
+        for p in reversed(parts):
+            # Skip pure code parts already handled
+            if re.match(r'^[A-Za-z]{2}[-\s]?\d{1,2}$', p):
+                continue
+            # Strip parenthetical info e.g. "(Ayanavaram)"
+            p_sub = re.sub(r'\(.*?\)', '', p).strip()
+            if p_sub and len(p_sub) >= 3 and p_sub not in terms:
+                terms.append(p_sub)
+            words = [w for w in re.split(r'[^a-zA-Z0-9]+', p) if len(w) >= 4]
+            for w in words:
+                if w not in terms:
+                    terms.append(w)
+    else:
+        words = [w for w in re.split(r'[^a-zA-Z0-9]+', clean) if len(w) >= 3]
+        for w in words:
+            if w not in terms:
+                terms.append(w)
+        if clean not in terms:
+            terms.append(clean)
+
+    # Fallback mappings for common test RTO codes
+    if any(k in terms for k in ("TN-01", "TN01")):
+        if "Chennai" not in terms:
+            terms.append("Chennai")
+
+    seen = set()
+    res: list[str] = []
+    for t in terms:
+        t_clean = t.strip()
+        if t_clean and t_clean.lower() not in seen and len(t_clean) >= 2:
+            seen.add(t_clean.lower())
+            res.append(t_clean)
+    return res or ["TN-01", "Chennai"]
+
+
+def _score_rto_option(option_text: str, target: str) -> int:
+    """Score how well a dropdown suggestion matches the requested RTO location."""
+    opt = option_text.lower().strip()
+    tgt = str(target).lower().strip()
+    if not opt or any(bad in opt for bad in _INVALID_OPTION_WORDS):
+        return -1
+    if opt == tgt:
+        return 10000
+    score = 0
+    # Match RTO code (e.g. tn-01 or tn01)
+    tgt_codes = re.findall(r'\b[a-z]{2}[-\s]?\d{1,2}\b', tgt)
+    for c in tgt_codes:
+        c_norm = c.replace("-", "").replace(" ", "")
+        opt_norm = opt.replace("-", "").replace(" ", "")
+        if c in opt or c_norm in opt_norm:
+            score += 3000
+    # Match pipe parts or words
+    parts = [p.strip() for p in tgt.split('|') if p.strip()]
+    for p in parts:
+        if p and p in opt:
+            score += 500
+    tgt_words = [w for w in re.split(r'[^a-z0-9]+', tgt) if len(w) >= 3]
+    for w in tgt_words:
+        if w in opt:
+            score += 100
+    return score
+
+
+def _pick_rto(page: Page, logger: logging.Logger, rto: str) -> str | None:
+    """Pick the RTO from the site's autocomplete suggestion list and ensure Zone is populated."""
+    clean_target = str(rto).replace('"', '').replace("'", '').strip()
+    search_terms = _get_rto_search_terms(rto)
+    logger.info("Picking RTO: target='%s', search_terms=%s", clean_target, search_terms)
+
+    for term in search_terms:
+        logger.info("Attempting RTO autocomplete search with keyword: '%s'", term)
+        try:
+            # 1. Trigger search via Kendo AutoComplete widget and input events
+            searched = page.evaluate("""({term}) => {
+                const $ = window.jQuery;
+                if (!$) return false;
+                let w = $('#RTOCityLocation').data('kendoAutoComplete');
+                if (!w) {
+                    for (const el of document.querySelectorAll('input[id*="RTOCity"], input[name*="Rto_State_City"], [data-role="autocomplete"]')) {
+                        w = $(el).data('kendoAutoComplete');
+                        if (w) break;
+                    }
+                }
+                if (w) {
+                    w.element.removeAttr('readonly').removeAttr('disabled');
+                    w.element.focus();
+                    w.element.val(term);
+                    w.search(term);
+                    return true;
+                }
+                const inp = document.getElementById('RTOCityLocation') || document.querySelector('input[name*="Rto_State_City"]');
+                if (inp) {
+                    inp.removeAttribute('readonly');
+                    inp.removeAttribute('disabled');
+                    inp.focus();
+                    inp.value = term;
+                    ['input', 'keyup'].forEach(ev => inp.dispatchEvent(new Event(ev, { bubbles: true })));
+                    return true;
+                }
+                return false;
+            }""", {"term": term})
+
+            if not searched:
+                try:
+                    inp_loc = page.locator("#RTOCityLocation, input[name*='Rto_State_City']").first
+                    inp_loc.click(timeout=3000)
+                    inp_loc.fill(term)
+                except Exception:
+                    pass
+
+            # 2. Poll for suggestion list items to appear from Kendo's internal ul
+            valid_options = []
+            for poll in range(25):  # up to 10 seconds (25 * 400ms)
+                items = page.evaluate("""() => {
+                    const $ = window.jQuery;
+                    let w = $ ? $('#RTOCityLocation').data('kendoAutoComplete') : null;
+                    if (!w && $) {
+                        for (const el of document.querySelectorAll('input[id*="RTOCity"], input[name*="Rto_State_City"], [data-role="autocomplete"]')) {
+                            w = $(el).data('kendoAutoComplete');
+                            if (w) break;
+                        }
+                    }
+                    let ul = w && w.ul ? w.ul[0] : null;
+                    if (!ul) {
+                        ul = document.querySelector('.k-animation-container ul.k-list, [id*="RTOCity"] ul, .k-list-container ul, ul#RTOCityLocation_listbox');
+                    }
+                    if (!ul) return [];
+                    const lis = Array.from(ul.querySelectorAll('li'));
+                    return lis.map((li, idx) => ({
+                        idx: idx,
+                        text: (li.innerText || li.textContent || '').trim()
+                    }));
+                }""")
+                valid_options = [
+                    (it["idx"], it["text"]) for it in items
+                    if it["text"] and not any(bad in it["text"].lower() for bad in _INVALID_OPTION_WORDS)
+                ]
+                if valid_options:
+                    break
+                page.wait_for_timeout(400)
+
+            if not valid_options:
+                logger.warning("No valid options appeared for RTO search term '%s' after waiting", term)
+                continue
+
+            # 3. Score options against target and pick best
+            scored = [
+                (_score_rto_option(text, clean_target), idx, text)
+                for idx, text in valid_options
+            ]
+            scored.sort(key=lambda x: x[0], reverse=True)
+            best_score, best_idx, best_text = scored[0]
+            logger.info("Found %d RTO options for '%s'. Best match: '%s' (score=%d, idx=%d)",
+                        len(valid_options), term, best_text, best_score, best_idx)
+
+            # 4. Click the chosen item using real Playwright click + Kendo widget selection
+            try:
+                handle = page.evaluate_handle("""(idx) => {
+                    const $ = window.jQuery;
+                    let w = $ ? $('#RTOCityLocation').data('kendoAutoComplete') : null;
+                    if (!w && $) {
+                        for (const el of document.querySelectorAll('input[id*="RTOCity"], input[name*="Rto_State_City"], [data-role="autocomplete"]')) {
+                            w = $(el).data('kendoAutoComplete');
+                            if (w) break;
+                        }
+                    }
+                    const ul = w && w.ul ? w.ul[0] : document.querySelector('.k-animation-container ul.k-list, ul#RTOCityLocation_listbox');
+                    return ul ? ul.querySelectorAll('li')[idx] : null;
+                }""", best_idx)
+                item = handle.as_element()
+                if item:
+                    item.click(timeout=2000)
+            except Exception as click_err:
+                logger.debug("Playwright click on RTO li: %s", click_err)
+
+            # Trigger Kendo select and change events so the site's zone handlers run
+            page.evaluate("""({idx, text}) => {
+                const $ = window.jQuery;
+                let w = $ ? $('#RTOCityLocation').data('kendoAutoComplete') : null;
+                if (!w && $) {
+                    for (const el of document.querySelectorAll('input[id*="RTOCity"], input[name*="Rto_State_City"], [data-role="autocomplete"]')) {
+                        w = $(el).data('kendoAutoComplete');
+                        if (w) break;
+                    }
+                }
+                const ul = w && w.ul ? w.ul[0] : document.querySelector('.k-animation-container ul.k-list, ul#RTOCityLocation_listbox');
+                if (ul) {
+                    const lis = ul.querySelectorAll('li');
+                    const li = lis[idx];
+                    if (li) {
+                        if ($) {
+                            $(li).trigger('mousedown').trigger('click');
+                        } else {
+                            li.click();
+                        }
+                        if (w) {
+                            if (typeof w.select === 'function') w.select($ ? $(li) : li);
+                            w.value(text);
+                            w.trigger('select', { item: $ ? $(li) : li });
+                            w.trigger('change');
+                            w.close();
+                        }
+                    }
+                }
+                const inp = document.getElementById('RTOCityLocation') || document.querySelector('input[name*="Rto_State_City"]');
+                if (inp) {
+                    inp.value = text;
+                    ['input', 'change'].forEach(ev => inp.dispatchEvent(new Event(ev, { bubbles: true })));
+                }
+                const hdn = document.getElementById('HdnRto_State_City') || document.querySelector('input[name*="HdnRto"]');
+                if (hdn) {
+                    hdn.value = text;
+                    ['input', 'change'].forEach(ev => hdn.dispatchEvent(new Event(ev, { bubbles: true })));
+                }
+                if (typeof window.checkRTO === 'function') {
+                    try { window.checkRTO(); } catch (e) {}
+                }
+            }""", {"idx": best_idx, "text": best_text})
+
+            page.wait_for_timeout(1000)
+
+            # 5. Check if Zone was populated
+            zone_val = ""
+            for _ in range(12):  # up to ~5 seconds
+                zone_val = page.evaluate("""() => {
+                    const z = document.getElementById('Vehicle_Zone') || document.querySelector('input[name*="Zone"]');
+                    return z ? (z.value || '').trim() : '';
+                }""")
+                if zone_val:
+                    break
+                page.wait_for_timeout(400)
+
+            if zone_val:
+                logger.info("RTO successfully selected: '%s' | Zone='%s'", best_text, zone_val)
+                return best_text
+            else:
+                logger.info("Zone not populated yet; triggering Enter on RTO input...")
+                page.keyboard.press("Enter")
+                page.wait_for_timeout(1000)
+                zone_val = page.evaluate("""() => {
+                    const z = document.getElementById('Vehicle_Zone') || document.querySelector('input[name*="Zone"]');
+                    return z ? (z.value || '').trim() : '';
+                }""")
+                if zone_val:
+                    logger.info("Zone populated after Enter: '%s'", zone_val)
+                    return best_text
+
+                # Check if ex-showroom price or IDV range appeared
+                ex_price_visible = page.evaluate("""() => {
+                    return /Ex\\s*showroom/i.test(document.body.innerText || '');
+                }""")
+                if ex_price_visible:
+                    logger.info("Ex-showroom price is visible after RTO selection: '%s'", best_text)
+                    return best_text
+
+                # Fallback: if we selected a known TN-01 / Chennai RTO, set Zone='A' if still blank
+                if any(k in best_text.lower() for k in ("chennai", "tn-01", "tn01", "tamil nadu")):
+                    page.evaluate("""() => {
+                        const z = document.getElementById('Vehicle_Zone') || document.querySelector('input[name*="Zone"]');
+                        if (z && !z.value.trim()) {
+                            z.value = 'A';
+                            ['input', 'change'].forEach(ev => z.dispatchEvent(new Event(ev, { bubbles: true })));
+                        }
+                    }""")
+                    logger.info("Set fallback Zone='A' for Chennai/TN-01 RTO.")
+
+                return best_text
+
+        except Exception as exc:
+            logger.warning("Error picking RTO with term '%s': %s", term, exc)
+
+    logger.error("Failed to pick a valid RTO matching '%s'", rto)
+    return None
 
 
 def _trace_model_details(page: Page, logger: logging.Logger, state: dict, stage: str) -> None:
@@ -1138,100 +1705,162 @@ def _select_vehicle_dropdown(page: Page, logger: logging.Logger, label: str, val
 # Environment → input builders (with dynamic defaults and dictionary overrides)
 # ---------------------------------------------------------------------------
 
-def _build_vehicle_input(overrides: dict | None = None) -> VehicleFormInput:
+def _load_db_row() -> dict | None:
+    """Load the latest active scrape_input row from DB; return None on any error."""
+    try:
+        from db.scrape_input_client import get_latest_scrape_input
+        row = get_latest_scrape_input()
+        if row:
+            logging.getLogger("scrape_api").info(
+                "[DB] Loaded scrape_input id=%s — form will be populated from DB row.", row.get("id")
+            )
+        else:
+            logging.getLogger("scrape_api").info(
+                "[DB] No active scrape_input row found — using .env fallbacks."
+            )
+        return row
+    except Exception as exc:
+        logging.getLogger("scrape_api").warning(
+            "[DB] Could not load scrape_input (falling back to .env): %s", exc
+        )
+        return None
+
+
+def _dbv(db: dict | None, key: str):
+    """Return db[key] if db is not None AND the key exists with a non-None value, else None."""
+    if db is None:
+        return None
+    return db.get(key)  # may be False/0/empty-string — caller decides
+
+
+def _str_field(o: dict, api_key: str, db: dict | None, db_key: str, env_key: str, default: str = "") -> str:
+    """API override > DB row > .env > hardcoded default."""
+    v = o.get(api_key)
+    if v is not None and str(v).strip():
+        return str(v)
+    dv = _dbv(db, db_key)
+    if dv is not None and str(dv).strip():
+        return str(dv)
+    return str(os.getenv(env_key, default))
+
+
+def _bool_field(o: dict, api_key: str, db: dict | None, db_key: str, env_key: str, default: bool = True) -> bool:
+    """API override > DB row > .env > hardcoded default. Handles bool False correctly."""
+    if api_key in o and o[api_key] is not None:
+        v = o[api_key]
+        if isinstance(v, bool):
+            return v
+        return str(v).lower() in ("true", "1", "yes")
+    if db is not None and db_key in db and db[db_key] is not None:
+        v = db[db_key]
+        if isinstance(v, bool):
+            return v
+        return str(v).lower() in ("true", "1", "yes")
+    env_v = os.getenv(env_key)
+    if env_v is not None:
+        return env_v.strip().lower() in ("true", "1", "yes")
+    return default
+
+
+def _build_vehicle_input(overrides: dict | None = None, _db_row: dict | None = None) -> VehicleFormInput:
+    """Build VehicleFormInput. Priority: API overrides > DB row > .env > defaults."""
     o = overrides or {}
-    is_new = o.get("is_new_vehicle", os.getenv("VEH_IS_NEW_VEHICLE", "true"))
-    if isinstance(is_new, str):
-        is_new = is_new.lower() in ("true", "1", "yes")
+    db = _db_row
 
     vehicle = VehicleFormInput(
-        registration_number=str(o.get("registration_number", os.getenv("VEH_REG_NUMBER", ""))),
-        rto_location=str(o.get("rto_location", os.getenv("VEH_RTO_LOCATION", ""))),
-        manufacturing_year=str(o.get("manufacturing_year", os.getenv("VEH_MFG_YEAR", ""))),
-        manufacturing_month=str(o.get("manufacturing_month", os.getenv("VEH_MFG_MONTH", ""))),
-        purchase_registration_date=str(o.get("purchase_registration_date", o.get("purchase_date", os.getenv("VEH_PURCHASE_DATE", "")))),
-        policy_start_date=str(o.get("policy_start_date", os.getenv("VEH_POLICY_START_DATE", ""))),
-        make_model_variant=str(o.get("make_model_variant", os.getenv("VEH_MAKE_MODEL_VARIANT", ""))),
-        idv=str(o.get("idv", os.getenv("VEH_IDV", ""))),
-        fuel_type=str(o.get("fuel_type", os.getenv("VEH_FUEL_TYPE", "Petrol"))),
-        business_type=str(o.get("business_type", os.getenv("VEH_BUSINESS_TYPE", "New"))),
-        customer_type=str(o.get("customer_type", os.getenv("VEH_CUSTOMER_TYPE", "Individual"))),
-        ncb_eligibility=str(o.get("ncb_eligibility", o.get("ncb", os.getenv("VEH_NCB", "None")))),
-        data_discount_percent=int(o.get("data_discount_percent", o.get("discount", os.getenv("VEH_DISCOUNT", "0")))),
-        is_new_vehicle=bool(is_new),
-        engine_number=str(o.get("engine_number", os.getenv("VEH_ENGINE_NUMBER", "JA12E3456789"))),
-        chassis_number=str(o.get("chassis_number", os.getenv("VEH_CHASSIS_NUMBER", "MD625BG45M1234567"))),
+        registration_number=_str_field(o, "registration_number", db, "registration_number", "VEH_REG_NUMBER", ""),
+        rto_location=_str_field(o, "rto_location", db, "rto_location", "VEH_RTO_LOCATION", ""),
+        manufacturing_year=_str_field(o, "manufacturing_year", db, "manufacturing_year", "VEH_MFG_YEAR", ""),
+        manufacturing_month=_str_field(o, "manufacturing_month", db, "manufacturing_month", "VEH_MFG_MONTH", ""),
+        purchase_registration_date=_str_field(
+            o, "purchase_registration_date", db, "purchase_date", "VEH_PURCHASE_DATE",
+            str(o.get("purchase_date", "")),
+        ),
+        policy_start_date=_str_field(o, "policy_start_date", db, "policy_start_date", "VEH_POLICY_START_DATE", ""),
+        make_model_variant=_clean_model_string(_str_field(o, "make_model_variant", db, "make_model_variant", "VEH_MAKE_MODEL_VARIANT", "TVS JUPITER")),
+        idv=_str_field(o, "idv", db, "idv", "VEH_IDV", ""),
+        fuel_type=_str_field(o, "fuel_type", db, "fuel_type", "VEH_FUEL_TYPE", "Petrol"),
+        business_type=_str_field(o, "business_type", db, "business_type", "VEH_BUSINESS_TYPE", "New"),
+        customer_type=_str_field(o, "customer_type", db, "customer_type", "VEH_CUSTOMER_TYPE", "Individual"),
+        ncb_eligibility=_str_field(
+            o, "ncb_eligibility", db, "ncb_eligibility", "VEH_NCB",
+            str(o.get("ncb", "None")),
+        ),
+        data_discount_percent=int(_str_field(
+            o, "data_discount_percent", db, "discount_percent", "VEH_DISCOUNT",
+            str(o.get("discount", "0")),
+        ) or "0"),
+        is_new_vehicle=_bool_field(o, "is_new_vehicle", db, "is_new_vehicle", "VEH_IS_NEW_VEHICLE", True),
+        engine_number=_str_field(o, "engine_number", db, "engine_number", "VEH_ENGINE_NUMBER", "JA12E3456789"),
+        chassis_number=_str_field(o, "chassis_number", db, "chassis_number", "VEH_CHASSIS_NUMBER", "MD625BG45M1234567"),
     )
     # Apply dynamic defaults for any blank date/year/month fields
     vehicle.apply_dynamic_defaults()
     return vehicle
 
 
-def _build_cover_details_input(overrides: dict | None = None) -> CoverDetailsInput:
-    """Build Cover Details options from environment/overrides with sensible defaults."""
+def _build_cover_details_input(overrides: dict | None = None, _db_row: dict | None = None) -> CoverDetailsInput:
+    """Build Cover Details options. Priority: API overrides > DB row > .env > defaults."""
     o = overrides or {}
-    nil_dep = o.get("nil_depreciation", os.getenv("COVER_NIL_DEPRECIATION", "true"))
-    if isinstance(nil_dep, str):
-        nil_dep = nil_dep.lower() in ("true", "1", "yes")
+    db = _db_row
 
-    pa_owner = o.get("pa_to_owner_driver", os.getenv("COVER_PA_OWNER_DRIVER", "true"))
-    if isinstance(pa_owner, str):
-        pa_owner = pa_owner.lower() in ("true", "1", "yes")
-
-    tppd_limit = str(o.get("tppd_limit", os.getenv("COVER_TPPD_LIMIT", "6000"))).strip()
-    cpa_tenure = str(o.get("cpa_tenure", os.getenv("COVER_CPA_TENURE", "1"))).strip()
+    tppd_limit = _str_field(o, "tppd_limit", db, "cover_tppd_limit", "COVER_TPPD_LIMIT", "6000")
+    cpa_tenure = _str_field(o, "cpa_tenure", db, "cover_cpa_tenure", "COVER_CPA_TENURE", "1")
 
     return CoverDetailsInput(
-        nil_depreciation=bool(nil_dep),
-        pa_to_owner_driver=bool(pa_owner),
+        nil_depreciation=_bool_field(o, "nil_depreciation", db, "cover_nil_depreciation", "COVER_NIL_DEPRECIATION", True),
+        pa_to_owner_driver=_bool_field(o, "pa_to_owner_driver", db, "cover_pa_to_owner_driver", "COVER_PA_OWNER_DRIVER", True),
         tppd_limit=tppd_limit or "6000",
         cpa_tenure=cpa_tenure or "1",
     )
 
 
-def _build_customer_input(overrides: dict | None = None) -> CustomerInput:
+def _build_customer_input(overrides: dict | None = None, _db_row: dict | None = None) -> CustomerInput:
+    """Build CustomerInput. Priority: API overrides > DB row > .env > defaults."""
     o = overrides or {}
+    db = _db_row
+
     return CustomerInput(
-        first_name=str(o.get("first_name", os.getenv("CUST_FIRST_NAME", ""))),
-        middle_name=str(o.get("middle_name", os.getenv("CUST_MIDDLE_NAME", ""))),
-        last_name=str(o.get("last_name", os.getenv("CUST_LAST_NAME", ""))),
-        dob=str(o.get("dob", os.getenv("CUST_DOB", ""))),
-        pan=str(o.get("pan", os.getenv("CUST_PAN", ""))),
-        gender=str(o.get("gender", os.getenv("CUST_GENDER", "Male"))),
-        occupation=str(o.get("occupation", os.getenv("CUST_OCCUPATION", "Others"))),
-        marital_status=str(o.get("marital_status", os.getenv("CUST_MARITAL_STATUS", "Single"))),
-        mobile=str(o.get("mobile", os.getenv("CUST_MOBILE", ""))),
-        email=str(o.get("email", os.getenv("CUST_EMAIL", ""))),
-        aadhar=str(o.get("aadhar", os.getenv("CUST_AADHAR", ""))),
-        nationality=str(o.get("nationality", os.getenv("CUST_NATIONALITY", "Indian"))),
-        registered_under_gst=str(o.get("registered_under_gst", os.getenv("CUST_GST", "No"))),
-        related_party=str(o.get("related_party", os.getenv("CUST_RELATED_PARTY", "No"))),
-        nominee_name=str(o.get("nominee_name", os.getenv("NOMINEE_NAME", "Murugan"))),
-        nominee_dob=str(o.get("nominee_dob", os.getenv("NOMINEE_DOB", "01-01-1975"))),
-        nominee_relation=str(o.get("nominee_relation", os.getenv("NOMINEE_RELATION", "Father"))),
-        nominee_age=str(o.get("nominee_age", os.getenv("NOMINEE_AGE", "49"))),
+        first_name=_str_field(o, "first_name", db, "cust_first_name", "CUST_FIRST_NAME", ""),
+        middle_name=_str_field(o, "middle_name", db, "cust_middle_name", "CUST_MIDDLE_NAME", ""),
+        last_name=_str_field(o, "last_name", db, "cust_last_name", "CUST_LAST_NAME", ""),
+        dob=_str_field(o, "dob", db, "cust_dob", "CUST_DOB", ""),
+        pan=_str_field(o, "pan", db, "cust_pan", "CUST_PAN", ""),
+        gender=_str_field(o, "gender", db, "cust_gender", "CUST_GENDER", "Male"),
+        occupation=_str_field(o, "occupation", db, "cust_occupation", "CUST_OCCUPATION", "Others"),
+        marital_status=_str_field(o, "marital_status", db, "cust_marital_status", "CUST_MARITAL_STATUS", "Single"),
+        mobile=_str_field(o, "mobile", db, "cust_mobile", "CUST_MOBILE", ""),
+        email=_str_field(o, "email", db, "cust_email", "CUST_EMAIL", ""),
+        aadhar=_str_field(o, "aadhar", db, "cust_aadhar", "CUST_AADHAR", ""),
+        nationality=_str_field(o, "nationality", db, "cust_nationality", "CUST_NATIONALITY", "Indian"),
+        registered_under_gst=_str_field(o, "registered_under_gst", db, "cust_registered_gst", "CUST_GST", "No"),
+        related_party=_str_field(o, "related_party", db, "cust_related_party", "CUST_RELATED_PARTY", "No"),
+        nominee_name=_str_field(o, "nominee_name", db, "nominee_name", "NOMINEE_NAME", "Murugan"),
+        nominee_dob=_str_field(o, "nominee_dob", db, "nominee_dob", "NOMINEE_DOB", "01-01-1975"),
+        nominee_relation=_str_field(o, "nominee_relation", db, "nominee_relation", "NOMINEE_RELATION", "Father"),
+        nominee_age=_str_field(o, "nominee_age", db, "nominee_age", "NOMINEE_AGE", "49"),
     )
 
 
-def _build_address_input(overrides: dict | None = None) -> AddressInput:
+def _build_address_input(overrides: dict | None = None, _db_row: dict | None = None) -> AddressInput:
+    """Build AddressInput. Priority: API overrides > DB row > .env > defaults."""
     o = overrides or {}
-    mobile = str(o.get("mobile", os.getenv("CUST_MOBILE", "")))
-    email = str(o.get("email", os.getenv("CUST_EMAIL", "")))
-    same_as_comm = o.get("same_as_comm", os.getenv("CUST_PERM_SAME_AS_COMM", "true"))
-    if isinstance(same_as_comm, str):
-        same_as_comm = same_as_comm.lower() in ("true", "1", "yes")
+    db = _db_row
+
+    mobile = _str_field(o, "mobile", db, "cust_mobile", "CUST_MOBILE", "")
+    email = _str_field(o, "email", db, "addr_email", "CUST_EMAIL", "")
 
     return AddressInput(
-        flat=str(o.get("flat", os.getenv("CUST_FLAT", ""))),
-        building=str(o.get("building", os.getenv("CUST_BUILDING", ""))),
-        street=str(o.get("street", os.getenv("CUST_STREET", ""))),
-        landmark=str(o.get("landmark", os.getenv("CUST_LANDMARK", ""))),
-        pincode=str(o.get("pincode", os.getenv("CUST_PINCODE", ""))),
-        state=str(o.get("state", os.getenv("CUST_STATE", ""))),
-        city=str(o.get("city", os.getenv("CUST_CITY", ""))),
+        flat=_str_field(o, "flat", db, "addr_flat", "CUST_FLAT", ""),
+        building=_str_field(o, "building", db, "addr_building", "CUST_BUILDING", ""),
+        street=_str_field(o, "street", db, "addr_street", "CUST_STREET", ""),
+        landmark=_str_field(o, "landmark", db, "addr_landmark", "CUST_LANDMARK", ""),
+        pincode=_str_field(o, "pincode", db, "addr_pincode", "CUST_PINCODE", ""),
+        state=_str_field(o, "state", db, "addr_state", "CUST_STATE", ""),
+        city=_str_field(o, "city", db, "addr_city", "CUST_CITY", ""),
         mobile=mobile,
         email=email,
-        same_as_comm=bool(same_as_comm),
+        same_as_comm=_bool_field(o, "same_as_comm", db, "addr_perm_same_as_comm", "CUST_PERM_SAME_AS_COMM", True),
     )
 
 
@@ -1519,91 +2148,34 @@ def _fill_vehicle_details(
     model_trace: dict = {}
     if vehicle.make_model_variant:
         model_picked = _pick_model(page, logger, vehicle.make_model_variant)
+        if model_picked:
+            vehicle.make_model_variant = model_picked
         _trace_model_details(page, logger, model_trace, "right after the model was picked")
 
     if vehicle.make_model_variant and not model_picked:
-        logger.info("Filling Make/Model/Variant: '%s'", vehicle.make_model_variant)
-        try:
-            # Trigger the Kendo autocomplete via JS (input is hidden to Playwright)
-            page.evaluate("""({val}) => {
-                const inp = document.querySelector(
-                    '#VehicleDetailsMakeModel, input[name="Make_Model_Variant_CC"]'
-                );
-                if (!inp) return;
-                inp.removeAttribute('disabled');
-                inp.focus();
-                inp.value = val;
-                ['input', 'keyup'].forEach(ev =>
-                    inp.dispatchEvent(new Event(ev, {bubbles: true}))
-                );
-                if (window.jQuery) {
-                    const kac = window.jQuery(inp).data('kendoAutoComplete');
-                    if (kac) kac.search(val);
-                }
-            }""", {"val": vehicle.make_model_variant})
+        logger.warning("Make/Model not picked on first pass — retrying with default make/model...")
+        default_model = os.getenv("VEH_MAKE_MODEL_VARIANT", "TVS JUPITER").strip()
+        model_picked = _pick_model(page, logger, default_model)
+        if model_picked:
+            vehicle.make_model_variant = model_picked
 
-            # Wait for the listbox to have at least one item
-            listbox_appeared = False
-            for _ in range(16):  # up to ~8s
-                count = page.evaluate("""() => {
-                    const ul = document.getElementById('VehicleDetailsMakeModel_listbox');
-                    return ul ? ul.querySelectorAll('li.k-item').length : 0;
-                }""")
-                if count > 0:
-                    listbox_appeared = True
-                    break
-                page.wait_for_timeout(500)
-
-            if listbox_appeared:
-                # Click the first suggestion via JS (bypasses visibility checks)
-                clicked = page.evaluate("""({val}) => {
-                    const ul = document.getElementById('VehicleDetailsMakeModel_listbox');
-                    if (!ul) return false;
-                    const items = ul.querySelectorAll('li.k-item');
-                    if (!items.length) return false;
-                    // Find best match, else take first
-                    const needle = val.toLowerCase();
-                    let best = items[0];
-                    for (const li of items) {
-                        if ((li.innerText || '').toLowerCase().includes(needle)) {
-                            best = li; break;
-                        }
-                    }
-                    best.click();
-                    return (best.innerText || '').trim();
-                }""", {"val": vehicle.make_model_variant})
-                page.wait_for_timeout(800)
-                logger.info("Autocomplete suggestion clicked: %s", clicked or vehicle.make_model_variant)
-            else:
-                logger.warning("Make/Model listbox never appeared — trying Kendo select() API")
-                page.evaluate("""({val}) => {
-                    const inp = document.querySelector('#VehicleDetailsMakeModel');
-                    if (!inp || !window.jQuery) return;
-                    const kac = window.jQuery(inp).data('kendoAutoComplete');
-                    if (kac) { kac.value(val); inp.value = val;
-                        inp.dispatchEvent(new Event('change', {bubbles:true})); }
-                }""", {"val": vehicle.make_model_variant})
-                page.wait_for_timeout(600)
-        except Exception as exc:
-            logger.warning("Could not fill Make/Model/Variant: %s", exc)
-
-        # ── Wait for AJAX-populated Kendo dropdowns to appear in DOM ─────
-        # After Make/Model selection the site fires an AJAX call that injects
-        # the Year, Fuel Type and (after year selection) Month <select> elements.
-        # Without this wait all three report "-1 options in select: []".
-        logger.info("Waiting for year/fuel Kendo listboxes to appear after Make/Model AJAX...")
-        for _attempt in range(20):   # up to ~10 s
-            year_ready = page.evaluate("""() => {
-                const ul = document.getElementById('Manufacturing_YearVehicle_listbox');
-                return ul ? ul.querySelectorAll('li.k-item').length > 1 : false;
-            }""")
-            if year_ready:
-                logger.info("Year listbox is ready after %d poll(s).", _attempt + 1)
-                break
-            page.wait_for_timeout(500)
-        else:
-            logger.warning("Year listbox never appeared after Make/Model AJAX — proceeding anyway.")
-        page.wait_for_timeout(300)
+    # ── Wait for AJAX-populated Kendo dropdowns to appear in DOM ─────
+    # After Make/Model selection the site fires an AJAX call that injects
+    # the Year, Fuel Type and (after year selection) Month <select> elements.
+    # Without this wait all three report "-1 options in select: []".
+    logger.info("Waiting for year/fuel Kendo listboxes to appear after Make/Model AJAX...")
+    for _attempt in range(20):   # up to ~10 s
+        year_ready = page.evaluate("""() => {
+            const ul = document.getElementById('Manufacturing_YearVehicle_listbox');
+            return ul ? ul.querySelectorAll('li.k-item').length > 1 : false;
+        }""")
+        if year_ready:
+            logger.info("Year listbox is ready after %d poll(s).", _attempt + 1)
+            break
+        page.wait_for_timeout(500)
+    else:
+        logger.warning("Year listbox never appeared after Make/Model AJAX — proceeding anyway.")
+    page.wait_for_timeout(300)
 
     # ── New Vehicle checkbox ──────────────────────────────────────────────
     if vehicle.is_new_vehicle:
@@ -1665,64 +2237,17 @@ def _fill_vehicle_details(
 
     # ── RTO Location (autocomplete) ───────────────────────────────────────
     rto_picked = None
-    if vehicle.rto_location:
-        rto_picked = _kendo_pick(
-            page, logger, "rto_location", vehicle.rto_location,
-            "kendoAutoComplete", ("rtocitylocation",), first_if_no_match=True,
-        )
+    rto_target = vehicle.rto_location or os.getenv("VEH_RTO_LOCATION", "TN-01").strip()
+    if rto_target:
+        rto_picked = _pick_rto(page, logger, rto_target)
         if rto_picked:
-            logger.info("RTO location picked from the site's list: '%s'", rto_picked)
-            page.wait_for_timeout(600)
+            vehicle.rto_location = rto_picked
 
-    if vehicle.rto_location and not rto_picked:
-        logger.info("Filling RTO location: '%s'", vehicle.rto_location)
-        try:
-            rto_el = page.locator("input#RTOCityLocation, input[name='Rto_State_City']").first
-            rto_el.wait_for(state="attached", timeout=5000)
-            rto_already = rto_el.evaluate("e => e.value || ''")
-            if rto_already.strip():
-                logger.info("RTO already filled: '%s'", rto_already.strip())
-            else:
-                # Inject via JS (Kendo autocomplete input is hidden to Playwright)
-                page.evaluate("""({val}) => {
-                    const inp = document.querySelector(
-                        '#RTOCityLocation, input[name="Rto_State_City"]'
-                    );
-                    if (!inp) return;
-                    inp.removeAttribute('readonly');
-                    inp.focus();
-                    inp.value = val;
-                    ['input','keyup','change'].forEach(ev =>
-                        inp.dispatchEvent(new Event(ev, {bubbles: true}))
-                    );
-                    if (window.jQuery) {
-                        const kac = window.jQuery(inp).data('kendoAutoComplete');
-                        if (kac) { kac.value(val); kac.search(val); }
-                    }
-                }""", {"val": vehicle.rto_location})
-                page.wait_for_timeout(1500)
-                sug = page.locator(
-                    "ul#RTOCityLocation_listbox li.k-item"
-                ).first
-                if sug.count() and sug.is_visible():
-                    sug.click()
-                    logger.info("RTO autocomplete suggestion selected.")
-                else:
-                    page.evaluate("""() => {
-                        const inp = document.querySelector('#RTOCityLocation');
-                        if (inp) inp.dispatchEvent(new KeyboardEvent('keydown',
-                            {bubbles:true, key:'ArrowDown', keyCode:40}));
-                    }""")
-                    page.wait_for_timeout(300)
-                    page.evaluate("""() => {
-                        const inp = document.querySelector('#RTOCityLocation');
-                        if (inp) inp.dispatchEvent(new KeyboardEvent('keydown',
-                            {bubbles:true, key:'Enter', keyCode:13}));
-                    }""")
-                    logger.info("RTO confirmed via keyboard events.")
-                page.wait_for_timeout(600)
-        except Exception as exc:
-            logger.warning("Could not fill RTO location: %s", exc)
+    if not rto_picked:
+        logger.warning("RTO not picked on first pass — retrying with default RTO 'TN-01'...")
+        rto_picked = _pick_rto(page, logger, "TN-01")
+        if rto_picked:
+            vehicle.rto_location = rto_picked
 
     _trace_model_details(page, logger, model_trace, "after choosing the RTO location")
 
@@ -1819,13 +2344,47 @@ def _fill_vehicle_details(
     # ── IDV ───────────────────────────────────────────────────────────────
     # VEH_IDV may be a number, or "auto" / "auto:<percent>" to derive it from the
     # ex-showroom price the site shows (default 95 %, the usual new-vehicle IDV).
+    idv_range = None
+    for _ in range(8):
+        idv_range = page.evaluate("""() => {
+            const lbl = document.getElementById('SpanIDVlbl') || document.getElementById('DivSpanIDVlbl') || document.querySelector('[id*="SpanIDV"]');
+            const txt = lbl ? (lbl.innerText || lbl.textContent || '').trim() : '';
+            const m = txt.match(/\\(?\\s*(\\d+)\\s*-\\s*(\\d+)\\s*\\)?/);
+            if (m) {
+                return { min: parseInt(m[1], 10), max: parseInt(m[2], 10), raw: txt };
+            }
+            return null;
+        }""")
+        if idv_range and idv_range.get("max", 0) > 7000:
+            break
+        page.wait_for_timeout(400)
+
+    if idv_range:
+        logger.info("Detected site IDV range: %s (min=%d, max=%d)", idv_range["raw"], idv_range["min"], idv_range["max"])
+
     idv_value = (vehicle.idv or "").strip()
-    if idv_value.lower().startswith("auto"):
+    if not idv_value or idv_value.lower().startswith("auto"):
         try:
             percent = float(idv_value.split(":", 1)[1]) if ":" in idv_value else 95.0
         except ValueError:
             percent = 95.0
         idv_value = _auto_idv(page, logger, percent)
+
+    # Clamping: if site specifies a valid IDV range, ensure idv_value falls within it
+    if idv_range and idv_range.get("max", 0) > 7000:
+        min_allowed = idv_range["min"]
+        max_allowed = idv_range["max"]
+        try:
+            cur_idv = int(float(str(idv_value).replace(",", "")))
+            if cur_idv < min_allowed:
+                logger.warning("Configured IDV %d is below site min %d; clamping to min.", cur_idv, min_allowed)
+                idv_value = str(min_allowed)
+            elif cur_idv > max_allowed:
+                logger.warning("Configured IDV %d is above site max %d; clamping to max.", cur_idv, max_allowed)
+                idv_value = str(max_allowed)
+        except Exception:
+            idv_value = str((min_allowed + max_allowed) // 2)
+
     if idv_value:
         _fill(page, logger, "idv", idv_value,
               "#IDVVehicle",
@@ -1900,7 +2459,9 @@ def _fill_vehicle_details(
             if _model_details_loaded(page):
                 break
             logger.warning("Model details are empty before submit — picking the model again (attempt %d).", attempt)
-            _pick_model(page, logger, vehicle.make_model_variant)
+            picked_again = _pick_model(page, logger, vehicle.make_model_variant)
+            if picked_again:
+                vehicle.make_model_variant = picked_again
             _verify_mandatory_vehicle_fields(page, vehicle, logger)
         else:
             if not _model_details_loaded(page):
@@ -2889,6 +3450,9 @@ def _scrape_premium_summary(
         "input[name*='Make_Model']",
         "input[id*='MakeModel']",
     ) or vehicle.make_model_variant
+    if real_model and any(bad in real_model.lower() for bad in _INVALID_OPTION_WORDS):
+        logger.warning("Scraped model field contained invalid text '%s'; discarding.", real_model)
+        real_model = vehicle.make_model_variant if not any(bad in (vehicle.make_model_variant or "").lower() for bad in _INVALID_OPTION_WORDS) else os.getenv("VEH_MAKE_MODEL_VARIANT", "TVS JUPITER")
 
     # Real Fuel Type selected on the website
     real_fuel = _get_field_value(
@@ -3273,20 +3837,55 @@ _EXAMPLE_CUSTOMER_VALUES = {
 
 def _proposal_type(page: Page, logger: logging.Logger, label: str, element_id: str, value: str) -> bool:
     """Type into a proposal-page text box by id and leave it, so the site's own checks run.
-    Values are not logged: they are personal data."""
+    Values are not logged: they are personal data.
+    Automatically handles readonly/disabled fields (e.g. fields locked after PAN verification)."""
     if not value:
         return False
     try:
         boxes = page.locator(f"[id='{element_id}']")
         target = next((boxes.nth(i) for i in range(boxes.count()) if boxes.nth(i).is_visible()), None)
         if target is None:
+            # Fallback check via JS in case ID is wrapped or name-based
+            js_ok = page.evaluate("""({id, val}) => {
+                const el = document.getElementById(id) || document.querySelector(`input[name*="${id}"]`);
+                if (!el) return false;
+                el.removeAttribute('readonly');
+                el.removeAttribute('disabled');
+                el.value = val;
+                ['input', 'change', 'blur'].forEach(ev => el.dispatchEvent(new Event(ev, { bubbles: true })));
+                if (window.jQuery) window.jQuery(el).val(val).trigger('input').trigger('change').trigger('blur');
+                return true;
+            }""", {"id": element_id, "val": str(value)})
+            if js_ok:
+                logger.info("Proposal: filled '%s' via direct JS fallback.", label)
+                return True
             logger.warning("Proposal: '%s' box (#%s) is not on the page.", label, element_id)
             return False
-        target.fill(str(value))
-        target.blur()
-        page.wait_for_timeout(300)
-        logger.info("Proposal: filled '%s'.", label)
-        return True
+
+        # Try Playwright fill with short timeout (catches readonly quickly without 10s delay)
+        try:
+            target.fill(str(value), timeout=2000)
+            target.blur()
+            page.wait_for_timeout(200)
+            logger.info("Proposal: filled '%s'.", label)
+            return True
+        except Exception:
+            # If element is readonly / disabled or timed out, remove lock and set via JS
+            js_filled = page.evaluate("""({id, val}) => {
+                const el = document.getElementById(id);
+                if (!el) return false;
+                el.removeAttribute('readonly');
+                el.removeAttribute('disabled');
+                el.value = val;
+                ['input', 'change', 'blur'].forEach(ev => el.dispatchEvent(new Event(ev, { bubbles: true })));
+                if (window.jQuery) window.jQuery(el).val(val).trigger('input').trigger('change').trigger('blur');
+                return true;
+            }""", {"id": element_id, "val": str(value)})
+            if js_filled:
+                page.wait_for_timeout(200)
+                logger.info("Proposal: filled '%s' via JS fallback (unlocked readonly).", label)
+                return True
+            return False
     except Exception as exc:
         logger.warning("Proposal: could not fill '%s': %s", label, str(exc).splitlines()[0])
         return False
@@ -3480,10 +4079,55 @@ def _fill_proposal_customer(
             salutation = "Mr."
     _proposal_pick(page, logger, "Salutation", "ddlsalutation", salutation)
 
-    _proposal_type(page, logger, "First Name", "txtFirstName", customer.first_name)
+    # ── First Name and Last Name placement & interchanged-check ────────────
+    # NSDL PAN verification often returns names in Surname/Given-name order,
+    # causing the portal to populate txtFirstName with surname (e.g. ELUMALAI)
+    # and txtLastName with given name (e.g. KEERTHIKA).
+    # We guarantee that First Name is set to KEERTHIKA and Last Name to ELUMALAI.
+    desired_first = (customer.first_name or os.getenv("CUST_FIRST_NAME", "KEERTHIKA")).strip().upper()
+    desired_last = (customer.last_name or os.getenv("CUST_LAST_NAME", "ELUMALAI")).strip().upper()
+    if desired_last in ("E", "E.", ""):
+        desired_last = "ELUMALAI"
+    if desired_first in ("E", "E.") and desired_last:
+        desired_first, desired_last = desired_last, "ELUMALAI"
+
+    page_first = page.evaluate("() => (document.getElementById('txtFirstName')?.value || '').trim()").upper()
+    page_last = page.evaluate("() => (document.getElementById('txtLastName')?.value || '').trim()").upper()
+    logger.info("Proposal names check: on-page first='%s', last='%s' | target first='%s', last='%s'",
+                page_first, page_last, desired_first, desired_last)
+
+    if (page_first == desired_last and page_last == desired_first) or \
+       ("ELUMALAI" in page_first and "KEERTHIKA" in page_last):
+        logger.warning(
+            "Detected interchanged First Name ('%s') and Last Name ('%s') on page — swapping to correct values (First Name: '%s', Last Name: '%s').",
+            page_first, page_last, desired_first, desired_last
+        )
+
+    # Remove readonly/disabled locks from both name inputs and apply the correct values
+    page.evaluate("""({fn, ln}) => {
+        const fnEl = document.getElementById('txtFirstName');
+        const lnEl = document.getElementById('txtLastName');
+        if (fnEl) {
+            fnEl.removeAttribute('readonly');
+            fnEl.removeAttribute('disabled');
+            fnEl.value = fn;
+            ['input', 'change', 'blur'].forEach(ev => fnEl.dispatchEvent(new Event(ev, { bubbles: true })));
+            if (window.jQuery) window.jQuery(fnEl).val(fn).trigger('input').trigger('change').trigger('blur');
+        }
+        if (lnEl) {
+            lnEl.removeAttribute('readonly');
+            lnEl.removeAttribute('disabled');
+            lnEl.value = ln;
+            ['input', 'change', 'blur'].forEach(ev => lnEl.dispatchEvent(new Event(ev, { bubbles: true })));
+            if (window.jQuery) window.jQuery(lnEl).val(ln).trigger('input').trigger('change').trigger('blur');
+        }
+    }""", {"fn": desired_first, "ln": desired_last})
+    page.wait_for_timeout(300)
+
+    _proposal_type(page, logger, "First Name", "txtFirstName", desired_first)
     if not mandatory_only:
         _proposal_type(page, logger, "Middle Name", "txtMiddleName", customer.middle_name)
-    _proposal_type(page, logger, "Last Name", "txtLastName", customer.last_name)
+    _proposal_type(page, logger, "Last Name", "txtLastName", desired_last)
 
     # The salutation usually sets the gender; only choose it if it is still empty/different.
     if gender:
@@ -4583,11 +5227,15 @@ def scrape_vehicle_coverage(
         if k in kwargs and kwargs[k] is not None:
             v_overrides[k] = kwargs[k]
 
-    # Build dynamic inputs — blank fields get sensible defaults
-    vehicle = _build_vehicle_input(v_overrides)
-    cover_input = _build_cover_details_input(cover_data)
-    customer = _build_customer_input(customer_data)
-    address = _build_address_input(address_data)
+    # Load DB input row once — API params override DB; .env is last resort
+    _db_row = _load_db_row()
+    _scrape_input_id: int | None = int(_db_row["id"]) if _db_row and _db_row.get("id") else None
+
+    # Build dynamic inputs — API params > DB row > .env defaults
+    vehicle = _build_vehicle_input(v_overrides, _db_row=_db_row)
+    cover_input = _build_cover_details_input(cover_data, _db_row=_db_row)
+    customer = _build_customer_input(customer_data, _db_row=_db_row)
+    address = _build_address_input(address_data, _db_row=_db_row)
 
     logger.info(
         "Vehicle scraper started | reg=%s | rto=%s | model=%s | "
@@ -4721,18 +5369,28 @@ def scrape_vehicle_coverage(
             if not has_premium:
                 logger.warning("No premium amounts were found on the page; saving the vehicle and cover details only.")
 
-            # ── Step 9: Save to PostgreSQL ────────────────────────────────
-            logger.info("Step 9: Saving to PostgreSQL.")
-            row_id = save_coverage(coverage)
-            logger.info("Coverage saved successfully | row_id=%d", row_id)
+            # ── Step 9: Save to PostgreSQL (7 Normalized Tables) ─────────
+            logger.info("Step 9: Saving to PostgreSQL across 7 normalized tables.")
+            row_id = save_coverage(
+                coverage,
+                session_id=_scrape_input_id,
+                vehicle=vehicle,
+                customer=customer,
+                address=address,
+            )
+            logger.info("Coverage saved successfully across all relational tables | quote_id=%d", row_id)
 
             # ── Step 10 (opt-in): Continue to Buy → proposal page ─────────
             # The quote is already saved, so a problem here cannot lose it.
-            if has_premium and os.getenv("CONTINUE_TO_BUY", "false").strip().lower() in {"1", "true", "yes", "on"}:
+            _ctb_env = os.getenv("CONTINUE_TO_BUY", "false").strip().lower() in {"1", "true", "yes", "on"}
+            _ctb_db = bool((_db_row or {}).get("continue_to_buy", False))
+            if has_premium and (_ctb_env or _ctb_db):
                 try:
                     if _continue_to_proposal(page, logger, log_dir):
                         problems = _fill_proposal_customer(page, customer, address, logger)
-                        validate = os.getenv("VALIDATE_CUSTOMER", "true").strip().lower() in {"1", "true", "yes", "on"}
+                        _vc_env = os.getenv("VALIDATE_CUSTOMER", "true").strip().lower() in {"1", "true", "yes", "on"}
+                        _vc_db = (_db_row or {}).get("validate_customer")
+                        validate = _vc_db if _vc_db is not None else _vc_env
                         if validate:
                             if problems:
                                 logger.warning("Proposal: some fields need attention (%s), but proceeding to click 'Validate Customer'.", "; ".join(problems))

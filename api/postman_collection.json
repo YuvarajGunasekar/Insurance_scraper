@@ -27,11 +27,6 @@
       "type": "string"
     },
     {
-      "key": "scrape_type",
-      "value": "full",
-      "type": "string"
-    },
-    {
       "key": "task_id",
       "value": "",
       "type": "string"
@@ -79,7 +74,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"website_url\": \"{{website_url}}\",\n  \"username\": \"{{username}}\",\n  \"password\": \"{{password}}\",\n  \"scrape_type\": \"full\",\n  \"vehicle\": {\n    \"registration_number\": \"\",\n    \"rto_location\": \"TN-01\",\n    \"make_model_variant\": \"TVS JUPITER\",\n    \"manufacturing_year\": \"2026\",\n    \"manufacturing_month\": \"February\",\n    \"purchase_date\": \"20-11-2026\",\n    \"policy_start_date\": \"20-11-2026\",\n    \"fuel_type\": \"Petrol\",\n    \"business_type\": \"New\",\n    \"customer_type\": \"Individual\",\n    \"ncb\": \"None\",\n    \"discount\": 0,\n    \"is_new_vehicle\": true\n  },\n  \"cover\": {\n    \"nil_depreciation\": true,\n    \"pa_to_owner_driver\": true\n  },\n  \"customer\": {\n    \"gender\": \"Male\",\n    \"occupation\": \"Others\",\n    \"marital_status\": \"Single\",\n    \"nationality\": \"Indian\",\n    \"registered_under_gst\": \"No\"\n  },\n  \"address\": {\n    \"same_as_comm\": true\n  }\n}",
+          "raw": "{\n  \"username\": \"{{username}}\",\n  \"password\": \"{{password}}\"\n}",
           "options": {
             "raw": {
               "language": "json"
