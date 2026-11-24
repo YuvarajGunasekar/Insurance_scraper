@@ -276,7 +276,13 @@ def login_status(task_id: UUID, request: Request) -> LoginStatusResponse:
 def create_scrape_input(payload: ScrapeInputCreate) -> ScrapeInputResponse:
     """Create a new scrape_input row (future scrapes read from the latest active row)."""
     data = payload.model_dump()
-    new_id = save_scrape_input(data)
+    try:
+        new_id = save_scrape_input(data)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
     row = get_scrape_input_by_id(new_id)
     if row is None:
         raise HTTPException(status_code=500, detail="Failed to retrieve created row.")
@@ -360,7 +366,13 @@ def create_scrape_session(payload: ScrapeSessionCreate) -> ScrapeInputResponse:
     by foreign keys. Returns the same response as POST /api/scrape-input.
     """
     flat_data = payload.to_flat()
-    new_id = save_scrape_input(flat_data)
+    try:
+        new_id = save_scrape_input(flat_data)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
     row = get_scrape_input_by_id(new_id)
     if row is None:
         raise HTTPException(status_code=500, detail="Failed to retrieve created session.")

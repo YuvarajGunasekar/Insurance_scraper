@@ -99,8 +99,8 @@ class LoginStatusResponse(BaseModel):
 
 
 class CoverRequest(BaseModel):
-    nil_depreciation: bool = True
-    pa_to_owner_driver: bool = True
+    nil_depreciation: bool
+    pa_to_owner_driver: bool
 
 
 class CustomerRequest(BaseModel):
@@ -109,15 +109,15 @@ class CustomerRequest(BaseModel):
     last_name: str | None = None
     dob: str | None = None
     pan: str | None = None
-    gender: str = "Male"
-    occupation: str = "Others"
-    marital_status: str = "Single"
+    gender: str | None = None
+    occupation: str | None = None
+    marital_status: str | None = None
     mobile: str | None = None
     email: str | None = None
     aadhar: str | None = None
-    nationality: str = "Indian"
-    registered_under_gst: str = "No"
-    related_party: str = "No"
+    nationality: str | None = None
+    registered_under_gst: str | None = None
+    related_party: str | None = None
 
 
 class AddressRequest(BaseModel):
@@ -130,7 +130,7 @@ class AddressRequest(BaseModel):
     city: str | None = None
     mobile: str | None = None
     email: str | None = None
-    same_as_comm: bool = True
+    same_as_comm: bool
 
 
 class VehicleRequest(BaseModel):
@@ -150,7 +150,7 @@ class VehicleRequest(BaseModel):
 
 
 class ScrapeInputCreate(BaseModel):
-    """All fields for creating a new scrape session (flat format, backward compatible).
+    """All fields for creating a new scrape session (flat format).
 
     Internally the server distributes these fields across 6 normalized tables:
     scrape_session, vehicle_input, cover_input, customer_input, nominee_input, address_input.
@@ -159,62 +159,63 @@ class ScrapeInputCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # Vehicle
-    registration_number: str = "NEW"
-    rto_location: str = ""
-    make_model_variant: str = ""
-    manufacturing_year: str = ""
-    manufacturing_month: str = ""
-    fuel_type: str = "Petrol"
-    business_type: str = "New"
-    customer_type: str = "Individual"
-    is_new_vehicle: bool = True
-    idv: str = "auto"
-    ncb_eligibility: str = "None"
-    discount_percent: int = 0
-    purchase_date: str | None = None
-    policy_start_date: str | None = None
+    registration_number: str
+    rto_location: str
+    make_model_variant: str
+    manufacturing_year: str
+    manufacturing_month: str
+    fuel_type: str
+    business_type: str
+    customer_type: str
+    is_new_vehicle: bool
+    idv: str
+    ncb_eligibility: str
+    discount_percent: int
+    purchase_date: str
+    policy_start_date: str
     engine_number: str | None = None
     chassis_number: str | None = None
 
     # OD covers
-    cover_basic_od: bool = False
-    cover_non_electrical_accessories: bool = False
-    cover_electrical_accessories: bool = False
-    cover_geo_extension: bool = False
-    cover_driving_tuition: bool = False
-    cover_fibre_glass_tank: bool = False
-    cover_voluntary_deductible: bool = False
-    cover_anti_theft_device: bool = False
-    cover_specially_designed: bool = False
-    cover_automobile_association: bool = False
+    cover_basic_od: bool
+    cover_non_electrical_accessories: bool
+    cover_electrical_accessories: bool
+    cover_geo_extension: bool
+    cover_driving_tuition: bool
+    cover_fibre_glass_tank: bool
+    cover_voluntary_deductible: bool
+    cover_anti_theft_device: bool
+    cover_specially_designed: bool
+    cover_automobile_association: bool
 
     # Liability covers
-    cover_tppd: bool = True
-    cover_tppd_limit: str = "6000"
-    cover_basic_liability: bool = True
-    cover_pa_to_owner_driver: bool = True
-    cover_cpa_tenure: str = "1"
-    cover_pa_to_named_passenger: bool = False
-    cover_pa_to_unnamed_passenger: bool = False
-    cover_pa_to_paid_driver: bool = False
-    cover_liability_to_paid_driver: bool = False
-    cover_liability_to_employees: bool = False
+    cover_tppd: bool
+    cover_tppd_limit: str
+    cover_basic_liability: bool
+    cover_pa_to_owner_driver: bool
+    cover_cpa_tenure: str
+    cover_pa_to_named_passenger: bool
+    cover_pa_to_unnamed_passenger: bool
+    cover_pa_to_paid_driver: bool
+    cover_liability_to_paid_driver: bool
+    cover_liability_to_employees: bool
 
     # AddOn covers
-    cover_nil_depreciation: bool = True
-    cover_electric_motor_protect: bool = False
-    cover_ev_battery_protection: bool = False
-    cover_ev_charger_cover: bool = False
-    cover_hospi_cash_30: bool = False
-    cover_hospi_cash_15: bool = False
-    cover_emergency_medical: bool = False
-    cover_assistance_cover_tw_shield: bool = False
-    cover_assistance_cover_tw: bool = False
-    cover_assistance_cover_24x7: bool = False
-    cover_key_protect: bool = False
-    cover_daily_allowance_7days: bool = False
-    cover_emi_protection: bool = False
-    cover_is_side_car: bool = False
+    cover_nil_depreciation: bool
+    cover_nil_depreciation_first_time: bool | None = None
+    cover_electric_motor_protect: bool
+    cover_ev_battery_protection: bool
+    cover_ev_charger_cover: bool
+    cover_hospi_cash_30: bool
+    cover_hospi_cash_15: bool
+    cover_emergency_medical: bool
+    cover_assistance_cover_tw_shield: bool
+    cover_assistance_cover_tw: bool
+    cover_assistance_cover_24x7: bool
+    cover_key_protect: bool
+    cover_daily_allowance_7days: bool
+    cover_emi_protection: bool
+    cover_is_side_car: bool
 
     # Customer
     cust_first_name: str | None = None
@@ -222,20 +223,20 @@ class ScrapeInputCreate(BaseModel):
     cust_last_name: str | None = None
     cust_dob: str | None = None
     cust_pan: str | None = None
-    cust_gender: str = "Male"
-    cust_occupation: str = "Others"
-    cust_marital_status: str = "Single"
+    cust_gender: str | None = None
+    cust_occupation: str | None = None
+    cust_marital_status: str | None = None
     cust_mobile: str | None = None
     cust_email: str | None = None
     cust_aadhar: str | None = None
-    cust_nationality: str = "Indian"
-    cust_registered_gst: str = "No"
-    cust_related_party: str = "No"
+    cust_nationality: str | None = None
+    cust_registered_gst: str | None = None
+    cust_related_party: str | None = None
 
     # Nominee
     nominee_name: str | None = None
     nominee_dob: str | None = None
-    nominee_relation: str = "Father"
+    nominee_relation: str | None = None
     nominee_age: str | None = None
 
     # Address
@@ -248,19 +249,21 @@ class ScrapeInputCreate(BaseModel):
     addr_city: str | None = None
     addr_mobile: str | None = None
     addr_email: str | None = None
-    addr_perm_same_as_comm: bool = True
+    addr_perm_same_as_comm: bool
 
     # Flow flags
-    continue_to_buy: bool = True
-    validate_customer: bool = True
-    upload_document: bool = True
-    upload_doc_type: str = "Invoice_Copy"
-    upload_doc_path: str = "sample_documents/sample_document.pdf"
-    save_proposal: bool = True
-    proceed_to_payment: bool = True
+    continue_to_buy: bool
+    validate_customer: bool
+    upload_document: bool
+    upload_doc_type: str | None = None
+    upload_doc_path: str | None = None
+    save_proposal: bool
+    proceed_to_payment: bool
+    click_get_coverage_details: bool
+    click_calculate_premium: bool
 
     # Meta
-    is_active: bool = True
+    is_active: bool
     notes: str | None = None
 
 
@@ -289,20 +292,20 @@ class ScrapeInputResponse(BaseModel):
 
 class VehicleInputCreate(BaseModel):
     """Vehicle Details form section → vehicle_input table."""
-    registration_number: str = "NEW"
-    rto_location: str = ""
-    make_model_variant: str = ""
-    manufacturing_year: str = ""
-    manufacturing_month: str = ""
-    fuel_type: str = "Petrol"
-    business_type: str = "New"
-    customer_type: str = "Individual"
-    is_new_vehicle: bool = True
-    idv: str = "auto"
-    ncb_eligibility: str = "None"
-    discount_percent: int = 0
-    purchase_date: str | None = None
-    policy_start_date: str | None = None
+    registration_number: str
+    rto_location: str
+    make_model_variant: str
+    manufacturing_year: str
+    manufacturing_month: str
+    fuel_type: str
+    business_type: str
+    customer_type: str
+    is_new_vehicle: bool
+    idv: str
+    ncb_eligibility: str
+    discount_percent: int
+    purchase_date: str
+    policy_start_date: str
     engine_number: str | None = None
     chassis_number: str | None = None
 
@@ -310,49 +313,50 @@ class VehicleInputCreate(BaseModel):
 class CoverInputCreate(BaseModel):
     """Cover Details form section → cover_input table."""
     # OD Package
-    cover_basic_od: bool = False
-    cover_non_electrical_accessories: bool = False
-    cover_electrical_accessories: bool = False
-    cover_geo_extension: bool = False
-    cover_driving_tuition: bool = False
-    cover_fibre_glass_tank: bool = False
-    cover_voluntary_deductible: bool = False
-    cover_anti_theft_device: bool = False
-    cover_specially_designed: bool = False
-    cover_automobile_association: bool = False
+    cover_basic_od: bool
+    cover_non_electrical_accessories: bool
+    cover_electrical_accessories: bool
+    cover_geo_extension: bool
+    cover_driving_tuition: bool
+    cover_fibre_glass_tank: bool
+    cover_voluntary_deductible: bool
+    cover_anti_theft_device: bool
+    cover_specially_designed: bool
+    cover_automobile_association: bool
     # Liability
-    cover_tppd: bool = True
-    cover_tppd_limit: str = "6000"
-    cover_basic_liability: bool = True
-    cover_pa_to_owner_driver: bool = True
-    cover_cpa_tenure: str = "1"
-    cover_pa_to_named_passenger: bool = False
-    cover_pa_to_unnamed_passenger: bool = False
-    cover_pa_to_paid_driver: bool = False
-    cover_liability_to_paid_driver: bool = False
-    cover_liability_to_employees: bool = False
+    cover_tppd: bool
+    cover_tppd_limit: str
+    cover_basic_liability: bool
+    cover_pa_to_owner_driver: bool
+    cover_cpa_tenure: str
+    cover_pa_to_named_passenger: bool
+    cover_pa_to_unnamed_passenger: bool
+    cover_pa_to_paid_driver: bool
+    cover_liability_to_paid_driver: bool
+    cover_liability_to_employees: bool
     # AddOn
-    cover_nil_depreciation: bool = True
-    cover_electric_motor_protect: bool = False
-    cover_ev_battery_protection: bool = False
-    cover_ev_charger_cover: bool = False
-    cover_hospi_cash_30: bool = False
-    cover_hospi_cash_15: bool = False
-    cover_emergency_medical: bool = False
-    cover_assistance_cover_tw_shield: bool = False
-    cover_assistance_cover_tw: bool = False
-    cover_assistance_cover_24x7: bool = False
-    cover_key_protect: bool = False
-    cover_daily_allowance_7days: bool = False
-    cover_emi_protection: bool = False
-    cover_is_side_car: bool = False
+    cover_nil_depreciation: bool
+    cover_nil_depreciation_first_time: bool | None = None
+    cover_electric_motor_protect: bool
+    cover_ev_battery_protection: bool
+    cover_ev_charger_cover: bool
+    cover_hospi_cash_30: bool
+    cover_hospi_cash_15: bool
+    cover_emergency_medical: bool
+    cover_assistance_cover_tw_shield: bool
+    cover_assistance_cover_tw: bool
+    cover_assistance_cover_24x7: bool
+    cover_key_protect: bool
+    cover_daily_allowance_7days: bool
+    cover_emi_protection: bool
+    cover_is_side_car: bool
 
 
 class NomineeInputCreate(BaseModel):
     """Nominee sub-section → nominee_input table (child of customer_input)."""
     nominee_name: str | None = None
     nominee_dob: str | None = None
-    nominee_relation: str = "Father"
+    nominee_relation: str | None = None
     nominee_age: str | None = None
 
 
@@ -363,15 +367,15 @@ class CustomerInputCreate(BaseModel):
     cust_last_name: str | None = None
     cust_dob: str | None = None
     cust_pan: str | None = None
-    cust_gender: str = "Male"
-    cust_occupation: str = "Others"
-    cust_marital_status: str = "Single"
+    cust_gender: str | None = None
+    cust_occupation: str | None = None
+    cust_marital_status: str | None = None
     cust_mobile: str | None = None
     cust_email: str | None = None
     cust_aadhar: str | None = None
-    cust_nationality: str = "Indian"
-    cust_registered_gst: str = "No"
-    cust_related_party: str = "No"
+    cust_nationality: str | None = None
+    cust_registered_gst: str | None = None
+    cust_related_party: str | None = None
     nominee: NomineeInputCreate = Field(default_factory=NomineeInputCreate)
 
 
@@ -388,7 +392,7 @@ class AddressInputCreate(BaseModel):
     addr_mobile: str | None = None
     addr_email: str | None = None
     # Permanent address
-    addr_perm_same_as_comm: bool = True
+    addr_perm_same_as_comm: bool
     perm_flat: str | None = None
     perm_building: str | None = None
     perm_street: str | None = None
@@ -400,14 +404,16 @@ class AddressInputCreate(BaseModel):
 
 class SessionFlowCreate(BaseModel):
     """Proposal flow control flags → scrape_session table."""
-    continue_to_buy: bool = True
-    validate_customer: bool = True
-    upload_document: bool = True
-    upload_doc_type: str = "Invoice_Copy"
-    upload_doc_path: str = "sample_documents/sample_document.pdf"
-    save_proposal: bool = True
-    proceed_to_payment: bool = True
-    is_active: bool = True
+    continue_to_buy: bool
+    validate_customer: bool
+    upload_document: bool
+    upload_doc_type: str | None = None
+    upload_doc_path: str | None = None
+    save_proposal: bool
+    proceed_to_payment: bool
+    click_get_coverage_details: bool
+    click_calculate_premium: bool
+    is_active: bool
     notes: str | None = None
 
 
@@ -416,11 +422,11 @@ class ScrapeSessionCreate(BaseModel):
     Structured (nested) alternative to ScrapeInputCreate.
     POST to /api/scrape-session to create a fully normalized session.
     """
-    vehicle: VehicleInputCreate = Field(default_factory=VehicleInputCreate)
-    covers: CoverInputCreate = Field(default_factory=CoverInputCreate)
-    customer: CustomerInputCreate = Field(default_factory=CustomerInputCreate)
-    address: AddressInputCreate = Field(default_factory=AddressInputCreate)
-    flow: SessionFlowCreate = Field(default_factory=SessionFlowCreate)
+    vehicle: VehicleInputCreate
+    covers: CoverInputCreate
+    customer: CustomerInputCreate
+    address: AddressInputCreate
+    flow: SessionFlowCreate
 
     def to_flat(self) -> dict:
         """Flatten nested structure to the same dict format as ScrapeInputCreate."""

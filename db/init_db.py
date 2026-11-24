@@ -61,20 +61,22 @@ CREATE TABLE IF NOT EXISTS insurance_quote (
     registration_number     TEXT            NOT NULL,
     policy_start_date       TEXT,
     purchase_date           TEXT,
-    business_type           TEXT            DEFAULT 'New',
-    customer_type           TEXT            DEFAULT 'Individual',
+    business_type           TEXT,
+    customer_type           TEXT,
     cover_type              TEXT,
     proposal_number         TEXT,
     trace_id                TEXT,
     -- Automation flow flags
-    continue_to_buy         BOOLEAN         NOT NULL DEFAULT TRUE,
-    validate_customer       BOOLEAN         NOT NULL DEFAULT TRUE,
-    upload_document         BOOLEAN         NOT NULL DEFAULT TRUE,
-    upload_doc_type         TEXT            DEFAULT 'Invoice_Copy',
-    upload_doc_path         TEXT            DEFAULT 'sample_documents/sample_document.pdf',
-    save_proposal           BOOLEAN         NOT NULL DEFAULT TRUE,
-    proceed_to_payment      BOOLEAN         NOT NULL DEFAULT TRUE,
-    is_active               BOOLEAN         NOT NULL DEFAULT TRUE,
+    continue_to_buy         BOOLEAN         NOT NULL,
+    validate_customer       BOOLEAN         NOT NULL,
+    upload_document         BOOLEAN         NOT NULL,
+    upload_doc_type         TEXT,
+    upload_doc_path         TEXT,
+    save_proposal           BOOLEAN         NOT NULL,
+    proceed_to_payment      BOOLEAN         NOT NULL,
+    click_get_coverage_details BOOLEAN NOT NULL,
+    click_calculate_premium BOOLEAN NOT NULL,
+    is_active               BOOLEAN         NOT NULL,
     notes                   TEXT,
     scraped_at              TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
     created_at              TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
@@ -98,9 +100,10 @@ CREATE TABLE IF NOT EXISTS vehicle_details (
     rto_location            TEXT,
     make_model_variant      TEXT,
     vehicle_make_model      TEXT,
-    fuel_type               TEXT            DEFAULT 'Petrol',
+    fuel_type               TEXT,
     manufacturing_year      TEXT,
     manufacturing_month     TEXT,
+    idv                     TEXT,
     engine_number           TEXT,
     chassis_number          TEXT,
     seating_capacity        TEXT,
@@ -109,9 +112,9 @@ CREATE TABLE IF NOT EXISTS vehicle_details (
     zone                    TEXT,
     lcc                     TEXT,
     ex_showroom_price       TEXT,
-    is_new_vehicle          BOOLEAN         DEFAULT TRUE,
-    ncb_eligibility         TEXT            DEFAULT 'None',
-    discount_percent        INTEGER         DEFAULT 0,
+    is_new_vehicle          BOOLEAN,
+    ncb_eligibility         TEXT,
+    discount_percent        INTEGER,
     created_at              TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
     UNIQUE (quote_id)
 );
@@ -130,44 +133,45 @@ CREATE TABLE IF NOT EXISTS cover_details (
                                                 REFERENCES insurance_quote(id) ON DELETE CASCADE,
 
     -- OD Package Covers
-    basic_od                            BOOLEAN DEFAULT FALSE,
-    non_electrical_accessories          BOOLEAN DEFAULT FALSE,
-    electrical_accessories              BOOLEAN DEFAULT FALSE,
-    geo_extension                       BOOLEAN DEFAULT FALSE,
-    driving_tuition                     BOOLEAN DEFAULT FALSE,
-    fibre_glass_tank                    BOOLEAN DEFAULT FALSE,
-    voluntary_deductible                BOOLEAN DEFAULT FALSE,
-    anti_theft_device                   BOOLEAN DEFAULT FALSE,
-    specially_designed                  BOOLEAN DEFAULT FALSE,
-    automobile_association              BOOLEAN DEFAULT FALSE,
+    basic_od                            BOOLEAN,
+    non_electrical_accessories          BOOLEAN,
+    electrical_accessories              BOOLEAN,
+    geo_extension                       BOOLEAN,
+    driving_tuition                     BOOLEAN,
+    fibre_glass_tank                    BOOLEAN,
+    voluntary_deductible                BOOLEAN,
+    anti_theft_device                   BOOLEAN,
+    specially_designed                  BOOLEAN,
+    automobile_association              BOOLEAN,
 
     -- Liability Covers
-    tppd                                BOOLEAN DEFAULT TRUE,
-    tppd_limit                          TEXT    DEFAULT '6000',
-    basic_liability                     BOOLEAN DEFAULT TRUE,
-    pa_to_owner_driver                  BOOLEAN DEFAULT TRUE,
-    cpa_tenure                          TEXT    DEFAULT '1',
-    pa_to_named_passenger               BOOLEAN DEFAULT FALSE,
-    pa_to_unnamed_passenger             BOOLEAN DEFAULT FALSE,
-    pa_to_paid_driver                   BOOLEAN DEFAULT FALSE,
-    liability_to_paid_driver            BOOLEAN DEFAULT FALSE,
-    liability_to_employees              BOOLEAN DEFAULT FALSE,
+    tppd                                BOOLEAN,
+    tppd_limit                          TEXT,
+    basic_liability                     BOOLEAN,
+    pa_to_owner_driver                  BOOLEAN,
+    cpa_tenure                          TEXT,
+    pa_to_named_passenger               BOOLEAN,
+    pa_to_unnamed_passenger             BOOLEAN,
+    pa_to_paid_driver                   BOOLEAN,
+    liability_to_paid_driver            BOOLEAN,
+    liability_to_employees              BOOLEAN,
 
     -- AddOn Covers
-    nil_depreciation                    BOOLEAN DEFAULT TRUE,
-    electric_motor_protect              BOOLEAN DEFAULT FALSE,
-    ev_battery_protection               BOOLEAN DEFAULT FALSE,
-    ev_charger_cover                    BOOLEAN DEFAULT FALSE,
-    hospi_cash_30                       BOOLEAN DEFAULT FALSE,
-    hospi_cash_15                       BOOLEAN DEFAULT FALSE,
-    emergency_medical                   BOOLEAN DEFAULT FALSE,
-    assistance_cover_tw_shield          BOOLEAN DEFAULT FALSE,
-    assistance_cover_tw                 BOOLEAN DEFAULT FALSE,
-    assistance_cover_24x7               BOOLEAN DEFAULT FALSE,
-    key_protect                         BOOLEAN DEFAULT FALSE,
-    daily_allowance_7days               BOOLEAN DEFAULT FALSE,
-    emi_protection                      BOOLEAN DEFAULT FALSE,
-    is_side_car                         BOOLEAN DEFAULT FALSE,
+    nil_depreciation                    BOOLEAN,
+    nil_depreciation_first_time         BOOLEAN,
+    electric_motor_protect              BOOLEAN,
+    ev_battery_protection               BOOLEAN,
+    ev_charger_cover                    BOOLEAN,
+    hospi_cash_30                       BOOLEAN,
+    hospi_cash_15                       BOOLEAN,
+    emergency_medical                   BOOLEAN,
+    assistance_cover_tw_shield          BOOLEAN,
+    assistance_cover_tw                 BOOLEAN,
+    assistance_cover_24x7               BOOLEAN,
+    key_protect                         BOOLEAN,
+    daily_allowance_7days               BOOLEAN,
+    emi_protection                      BOOLEAN,
+    is_side_car                         BOOLEAN,
 
     created_at                          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (quote_id)
@@ -190,15 +194,15 @@ CREATE TABLE IF NOT EXISTS customer_details (
     last_name           TEXT,
     dob                 TEXT,
     pan                 TEXT,
-    gender              TEXT            DEFAULT 'Male',
-    occupation          TEXT            DEFAULT 'Others',
-    marital_status      TEXT            DEFAULT 'Single',
+    gender              TEXT,
+    occupation          TEXT,
+    marital_status      TEXT,
     mobile              TEXT,
     email               TEXT,
     aadhar              TEXT,
-    nationality         TEXT            DEFAULT 'Indian',
-    registered_gst      TEXT            DEFAULT 'No',
-    related_party       TEXT            DEFAULT 'No',
+    nationality         TEXT,
+    registered_gst      TEXT,
+    related_party       TEXT,
     created_at          TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
     UNIQUE (quote_id)
 );
@@ -218,7 +222,7 @@ CREATE TABLE IF NOT EXISTS nominee_details (
     customer_id         INTEGER         REFERENCES customer_details(id) ON DELETE CASCADE,
     nominee_name        TEXT,
     nominee_dob         TEXT,
-    nominee_relation    TEXT            DEFAULT 'Father',
+    nominee_relation    TEXT,
     nominee_age         TEXT,
     created_at          TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
     UNIQUE (quote_id)
@@ -249,7 +253,7 @@ CREATE TABLE IF NOT EXISTS address_details (
     comm_email          TEXT,
 
     -- Permanent Address
-    perm_same_as_comm   BOOLEAN         NOT NULL DEFAULT TRUE,
+    perm_same_as_comm   BOOLEAN         NOT NULL,
     perm_flat           TEXT,
     perm_building       TEXT,
     perm_street         TEXT,
@@ -312,6 +316,8 @@ SELECT
     q.upload_doc_path,
     q.save_proposal,
     q.proceed_to_payment,
+    q.click_get_coverage_details,
+    q.click_calculate_premium,
     q.is_active,
     q.notes,
     q.scraped_at,
@@ -325,6 +331,7 @@ SELECT
     v.fuel_type,
     v.manufacturing_year,
     v.manufacturing_month,
+    v.idv                           AS idv,
     v.engine_number,
     v.chassis_number,
     v.seating_capacity,
@@ -363,6 +370,7 @@ SELECT
 
     -- Cover section (Addon)
     c.nil_depreciation              AS cover_nil_depreciation,
+    c.nil_depreciation_first_time   AS cover_nil_depreciation_first_time,
     c.electric_motor_protect        AS cover_electric_motor_protect,
     c.ev_battery_protection         AS cover_ev_battery_protection,
     c.ev_charger_cover              AS cover_ev_charger_cover,
@@ -456,7 +464,7 @@ SELECT
     addr.perm_city,
 
     -- Premium section
-    p.idv,
+    p.idv                           AS scraped_idv,
     p.base_od_premium,
     p.tp_premium,
     p.gst,
@@ -552,16 +560,92 @@ def create_tables() -> None:
 
         # Ensure all columns exist on insurance_quote in case table was created earlier
         cur.execute("""
-            ALTER TABLE insurance_quote ADD COLUMN IF NOT EXISTS continue_to_buy BOOLEAN NOT NULL DEFAULT TRUE;
-            ALTER TABLE insurance_quote ADD COLUMN IF NOT EXISTS validate_customer BOOLEAN NOT NULL DEFAULT TRUE;
-            ALTER TABLE insurance_quote ADD COLUMN IF NOT EXISTS upload_document BOOLEAN NOT NULL DEFAULT TRUE;
-            ALTER TABLE insurance_quote ADD COLUMN IF NOT EXISTS upload_doc_type TEXT DEFAULT 'Invoice_Copy';
-            ALTER TABLE insurance_quote ADD COLUMN IF NOT EXISTS upload_doc_path TEXT DEFAULT 'sample_documents/sample_document.pdf';
-            ALTER TABLE insurance_quote ADD COLUMN IF NOT EXISTS save_proposal BOOLEAN NOT NULL DEFAULT TRUE;
-            ALTER TABLE insurance_quote ADD COLUMN IF NOT EXISTS proceed_to_payment BOOLEAN NOT NULL DEFAULT TRUE;
-            ALTER TABLE insurance_quote ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;
+            ALTER TABLE vehicle_details ADD COLUMN IF NOT EXISTS idv TEXT;
+            ALTER TABLE cover_details ADD COLUMN IF NOT EXISTS nil_depreciation_first_time BOOLEAN;
+            ALTER TABLE insurance_quote ADD COLUMN IF NOT EXISTS click_get_coverage_details BOOLEAN;
+            ALTER TABLE insurance_quote ADD COLUMN IF NOT EXISTS click_calculate_premium BOOLEAN;
+            ALTER TABLE insurance_quote ADD COLUMN IF NOT EXISTS continue_to_buy BOOLEAN;
+            ALTER TABLE insurance_quote ADD COLUMN IF NOT EXISTS validate_customer BOOLEAN;
+            ALTER TABLE insurance_quote ADD COLUMN IF NOT EXISTS upload_document BOOLEAN;
+            ALTER TABLE insurance_quote ADD COLUMN IF NOT EXISTS upload_doc_type TEXT;
+            ALTER TABLE insurance_quote ADD COLUMN IF NOT EXISTS upload_doc_path TEXT;
+            ALTER TABLE insurance_quote ADD COLUMN IF NOT EXISTS save_proposal BOOLEAN;
+            ALTER TABLE insurance_quote ADD COLUMN IF NOT EXISTS proceed_to_payment BOOLEAN;
+            ALTER TABLE insurance_quote ADD COLUMN IF NOT EXISTS is_active BOOLEAN;
             ALTER TABLE insurance_quote ADD COLUMN IF NOT EXISTS notes TEXT;
+
+            ALTER TABLE insurance_quote ALTER COLUMN business_type DROP DEFAULT;
+            ALTER TABLE insurance_quote ALTER COLUMN customer_type DROP DEFAULT;
+            ALTER TABLE insurance_quote ALTER COLUMN continue_to_buy DROP DEFAULT;
+            ALTER TABLE insurance_quote ALTER COLUMN validate_customer DROP DEFAULT;
+            ALTER TABLE insurance_quote ALTER COLUMN upload_document DROP DEFAULT;
+            ALTER TABLE insurance_quote ALTER COLUMN upload_doc_type DROP DEFAULT;
+            ALTER TABLE insurance_quote ALTER COLUMN upload_doc_path DROP DEFAULT;
+            ALTER TABLE insurance_quote ALTER COLUMN save_proposal DROP DEFAULT;
+            ALTER TABLE insurance_quote ALTER COLUMN proceed_to_payment DROP DEFAULT;
+            ALTER TABLE insurance_quote ALTER COLUMN is_active DROP DEFAULT;
+
+            ALTER TABLE vehicle_details ALTER COLUMN fuel_type DROP DEFAULT;
+            ALTER TABLE vehicle_details ALTER COLUMN is_new_vehicle DROP DEFAULT;
+            ALTER TABLE vehicle_details ALTER COLUMN ncb_eligibility DROP DEFAULT;
+            ALTER TABLE vehicle_details ALTER COLUMN discount_percent DROP DEFAULT;
+
+            ALTER TABLE cover_details ALTER COLUMN basic_od DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN non_electrical_accessories DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN electrical_accessories DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN geo_extension DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN driving_tuition DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN fibre_glass_tank DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN voluntary_deductible DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN anti_theft_device DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN specially_designed DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN automobile_association DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN tppd DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN tppd_limit DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN basic_liability DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN pa_to_owner_driver DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN cpa_tenure DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN pa_to_named_passenger DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN pa_to_unnamed_passenger DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN pa_to_paid_driver DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN liability_to_paid_driver DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN liability_to_employees DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN nil_depreciation DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN electric_motor_protect DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN ev_battery_protection DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN ev_charger_cover DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN hospi_cash_30 DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN hospi_cash_15 DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN emergency_medical DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN assistance_cover_tw_shield DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN assistance_cover_tw DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN assistance_cover_24x7 DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN key_protect DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN daily_allowance_7days DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN emi_protection DROP DEFAULT;
+            ALTER TABLE cover_details ALTER COLUMN is_side_car DROP DEFAULT;
+
+            ALTER TABLE customer_details ALTER COLUMN gender DROP DEFAULT;
+            ALTER TABLE customer_details ALTER COLUMN occupation DROP DEFAULT;
+            ALTER TABLE customer_details ALTER COLUMN marital_status DROP DEFAULT;
+            ALTER TABLE customer_details ALTER COLUMN nationality DROP DEFAULT;
+            ALTER TABLE customer_details ALTER COLUMN registered_gst DROP DEFAULT;
+            ALTER TABLE customer_details ALTER COLUMN related_party DROP DEFAULT;
+            ALTER TABLE nominee_details ALTER COLUMN nominee_relation DROP DEFAULT;
+            ALTER TABLE address_details ALTER COLUMN perm_same_as_comm DROP DEFAULT;
             CREATE INDEX IF NOT EXISTS idx_insurance_quote_active ON insurance_quote (is_active, created_at DESC);
+        """)
+        conn.commit()
+
+        # Preserve the IDV exposed by the previous complete-quote view when
+        # moving the input IDV into vehicle_details.
+        cur.execute("""
+            UPDATE vehicle_details v
+            SET idv = p.idv
+            FROM premium_details p
+            WHERE p.quote_id = v.quote_id
+              AND v.idv IS NULL
+              AND p.idv IS NOT NULL;
         """)
         conn.commit()
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field, asdict
-from datetime import date
 from typing import Optional
 
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
@@ -17,119 +16,108 @@ from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
 @dataclass
 class VehicleFormInput:
     """All fields needed to fill the Vehicle Details form."""
-    registration_number: str = ""      # e.g. "MH12AB1234" or blank for new
-    rto_location: str = ""             # e.g. "TN-" to trigger autocomplete
-    manufacturing_year: str = ""       # e.g. "2026" — defaults to current year
-    manufacturing_month: str = ""      # e.g. "February" — defaults to current month
-    purchase_registration_date: str = ""  # DD-MM-YYYY — defaults to today
-    policy_start_date: str = ""        # DD-MM-YYYY — defaults to today
-    make_model_variant: str = ""       # e.g. "TVS JUPITER" – typed into autocomplete
-    idv: str = ""                      # e.g. "95000" or blank for auto-calc
-    fuel_type: str = "Petrol"          # Diesel / Petrol / CNG / Electric
-    business_type: str = "New"         # New / Renewal
-    customer_type: str = "Individual"  # Individual / Corporate
-    ncb_eligibility: str = "None"      # None / 20% / 25% / 35% / 45% / 50%
-    data_discount_percent: int = 0
-    is_new_vehicle: bool = True        # Check "New Vehicle" checkbox
+    registration_number: str
+    rto_location: str
+    manufacturing_year: str
+    manufacturing_month: str
+    purchase_registration_date: str
+    policy_start_date: str
+    make_model_variant: str
+    idv: str
+    fuel_type: str
+    business_type: str
+    customer_type: str
+    ncb_eligibility: str
+    data_discount_percent: int
+    is_new_vehicle: bool
     seating_capacity: str = ""
     vehicle_segment: str = ""
-    engine_number: str = ""            # e.g. "JA12E3456789" (Proposal Vehicle Details)
-    chassis_number: str = ""           # e.g. "MD625BG45M1234567" (Proposal Vehicle Details)
-
-    def apply_dynamic_defaults(self) -> None:
-        """Fill in blank mandatory fields with sensible dynamic defaults."""
-        today = date.today()
-        if not self.manufacturing_year:
-            self.manufacturing_year = str(today.year)
-        if not self.manufacturing_month:
-            self.manufacturing_month = today.strftime("%B")  # e.g. "November"
-        if not self.purchase_registration_date:
-            self.purchase_registration_date = today.strftime("%d-%m-%Y")
-        if not self.policy_start_date:
-            self.policy_start_date = today.strftime("%d-%m-%Y")
+    engine_number: str = ""
+    chassis_number: str = ""
 
 
 @dataclass
 class CoverDetailsInput:
     """Options for the Cover Details section (OD Package, Liability, AddOns)."""
     # OD Package checkboxes
-    basic_od: bool = False
-    non_electrical_accessories: bool = False
-    electrical_accessories: bool = False
-    geo_extension: bool = False
-    driving_tuition: bool = False
-    fibre_glass_tank: bool = False
-    voluntary_deductible: bool = False
-    anti_theft_device: bool = False
-    specially_designed: bool = False
-    automobile_association: bool = False
+    basic_od: bool
+    non_electrical_accessories: bool
+    electrical_accessories: bool
+    geo_extension: bool
+    driving_tuition: bool
+    fibre_glass_tank: bool
+    voluntary_deductible: bool
+    anti_theft_device: bool
+    specially_designed: bool
+    automobile_association: bool
 
     # Liability Covers
-    tppd: bool = True
-    tppd_limit: str = "6000"
-    basic_liability: bool = True
-    pa_to_owner_driver: bool = True
-    cpa_tenure: str = "1"
-    pa_to_named_passenger: bool = False
-    pa_to_unnamed_passenger: bool = False
-    pa_to_paid_driver: bool = False
-    liability_to_paid_driver: bool = False
-    liability_to_employees: bool = False
+    tppd: bool
+    tppd_limit: str
+    basic_liability: bool
+    pa_to_owner_driver: bool
+    cpa_tenure: str
+    pa_to_named_passenger: bool
+    pa_to_unnamed_passenger: bool
+    pa_to_paid_driver: bool
+    liability_to_paid_driver: bool
+    liability_to_employees: bool
+    nil_depreciation_first_time: bool | None
 
     # AddOn Covers
-    nil_depreciation: bool = True
-    nil_depreciation_rate: str = ""  # auto-filled by website (e.g. "0.3")
-    electric_motor_protect: bool = False
-    ev_battery_protection: bool = False
-    ev_charger_cover: bool = False
-    hospi_cash_30: bool = False
-    hospi_cash_15: bool = False
-    emergency_medical: bool = False
-    assistance_cover_tw_shield: bool = False
-    assistance_cover_tw: bool = False
-    assistance_cover_24x7: bool = False
-    key_protect: bool = False
-    daily_allowance_7days: bool = False
-    emi_protection: bool = False
-    is_side_car: bool = False
+    nil_depreciation: bool
+    electric_motor_protect: bool
+    ev_battery_protection: bool
+    ev_charger_cover: bool
+    hospi_cash_30: bool
+    hospi_cash_15: bool
+    emergency_medical: bool
+    assistance_cover_tw_shield: bool
+    assistance_cover_tw: bool
+    assistance_cover_24x7: bool
+    key_protect: bool
+    daily_allowance_7days: bool
+    emi_protection: bool
+    is_side_car: bool
 
 
 @dataclass
 class CustomerInput:
     """All fields needed to fill the Customer Details section of the Proposal form."""
-    first_name: str = ""
-    middle_name: str = ""
-    last_name: str = ""
-    dob: str = ""                   # DD-MM-YYYY
-    pan: str = ""
-    gender: str = "Male"            # Male / Female / Other
-    occupation: str = "Others"
-    marital_status: str = "Single"  # Single / Married / Divorced / Widowed
-    mobile: str = ""
-    email: str = ""
-    aadhar: str = ""
-    nationality: str = "Indian"
-    registered_under_gst: str = "No"
-    related_party: str = "No"
-    nominee_name: str = ""
-    nominee_dob: str = ""
-    nominee_relation: str = "Father"
-    nominee_age: str = ""
+    customer_type: str
+    first_name: str
+    middle_name: str
+    last_name: str
+    dob: str
+    pan: str
+    gender: str
+    occupation: str
+    marital_status: str
+    mobile: str
+    email: str
+    aadhar: str
+    nationality: str
+    registered_under_gst: str
+    related_party: str
+    nominee_name: str
+    nominee_dob: str
+    nominee_relation: str
+    nominee_age: str
 
 
 @dataclass
 class AddressInput:
     """Communication (and optionally Permanent) address fields."""
-    flat: str = ""
-    building: str = ""
-    street: str = ""
-    landmark: str = ""
-    pincode: str = ""
-    state: str = ""
-    city: str = ""
-    mobile: str = ""
-    email: str = ""
-    same_as_comm: bool = True       # tick "Permanent Address same as Communication" if True
+    flat: str
+    building: str
+    street: str
+    landmark: str
+    pincode: str
+    state: str
+    city: str
+    mobile: str
+    email: str
+    same_as_comm: bool
 
 
 @dataclass

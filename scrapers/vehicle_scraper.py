@@ -475,7 +475,7 @@ def _site_error_lines(page: Page) -> list[str]:
             const text = (document.body.innerText || '') + '\\n' +
                 (band && band.getClientRects().length ? band.innerText || '' : '');
             return text.split('\\n').map(l => l.trim())
-                .filter(l => /ErrorCode|Contact Corporate|Underwriter/i.test(l));
+                .filter(l => /ErrorCode|Contact Corporate|Underwriter|policy\\s*start\\s*date.*(?:cannot|past|invalid)/i.test(l));
         }""")
     except Exception:
         return []
@@ -605,6 +605,34 @@ def _select_business_type(page: Page, logger: logging.Logger, business_type: str
     return False
 
 
+def _select_customer_type(page: Page, customer_type: str) -> bool:
+    """Select the customer-type radio that matches the active DB value."""
+    return bool(page.evaluate("""(requestedType) => {
+        const normalize = value => String(value || '').toLowerCase()
+            .replace(/[^a-z0-9]+/g, ' ').trim();
+        const requested = normalize(requestedType);
+        const radios = Array.from(document.querySelectorAll('input[type="radio"]'))
+            .filter(r => /customer.?type|client.?type/i.test((r.id || '') + ' ' + (r.name || '')));
+        for (const radio of radios) {
+            const label = radio.id
+                ? document.querySelector(`label[for="${radio.id}"]`)
+                : null;
+            const ownLabel = radio.closest('label');
+            const details = normalize([
+                radio.id, radio.name, radio.value,
+                label && label.innerText, ownLabel && ownLabel.innerText,
+            ].filter(Boolean).join(' '));
+            if (!requested || !details.includes(requested)) continue;
+            radio.checked = true;
+            radio.dispatchEvent(new Event('change', {bubbles: true}));
+            radio.dispatchEvent(new Event('click', {bubbles: true}));
+            if (window.jQuery) window.jQuery(radio).trigger('change').trigger('click');
+            return true;
+        }
+        return false;
+    }""", customer_type))
+
+
 # Finds the LIVE Kendo widget for a field. Switching Sub Product re-renders the
 # form but leaves the old popups (e.g. ul#Manufacturing_MonthVehicle_listbox) in
 # <body>, so document.getElementById(...) returns a dead list belonging to the
@@ -636,7 +664,7 @@ _INVALID_OPTION_WORDS = ("no record", "no data", "not available", "please choose
 def _clean_model_string(raw: str | None) -> str:
     """Normalize a model string, stripping quotes and invalid text."""
     if not raw or any(bad in str(raw).lower() for bad in ("no record", "no data")):
-        return os.getenv("VEH_MAKE_MODEL_VARIANT", "TVS JUPITER").strip()
+        return ""
     return str(raw).replace('"', '').replace("'", '').strip()
 
 
@@ -646,6 +674,8 @@ def _get_model_search_terms(model: str) -> list[str]:
     -> ['JUPITER', 'TVS JUPITER', 'TVS']
     """
     clean = _clean_model_string(model)
+    if not clean:
+        return []
     parts = [p.strip() for p in clean.split('|') if p.strip()]
     terms: list[str] = []
     if len(parts) >= 2:
@@ -661,15 +691,7 @@ def _get_model_search_terms(model: str) -> list[str]:
             terms.append(words[0])
             terms.append(clean)
         else:
-            if clean.upper() == "TVS":
-                terms.extend(["JUPITER", "TVS JUPITER", "TVS", "XL 100", "RAIDER"])
-            elif clean.upper() in ("HONDA", "HERO", "BAJAJ", "YAMAHA", "SUZUKI", "ROYAL ENFIELD"):
-                default_env = os.getenv("VEH_MAKE_MODEL_VARIANT", "").strip()
-                if default_env and default_env.upper() != clean.upper():
-                    terms.append(default_env)
-                terms.append(clean)
-            else:
-                terms.append(clean)
+            terms.append(clean)
 
     seen = set()
     res: list[str] = []
@@ -678,7 +700,7 @@ def _get_model_search_terms(model: str) -> list[str]:
         if t_clean and t_clean.lower() not in seen and len(t_clean) >= 2:
             seen.add(t_clean.lower())
             res.append(t_clean)
-    return res or ["JUPITER", "TVS JUPITER", "TVS"]
+    return res
 
 
 def _score_model_option(option_text: str, target: str) -> int:
@@ -1085,11 +1107,6 @@ def _get_rto_search_terms(rto: str) -> list[str]:
         if clean not in terms:
             terms.append(clean)
 
-    # Fallback mappings for common test RTO codes
-    if any(k in terms for k in ("TN-01", "TN01")):
-        if "Chennai" not in terms:
-            terms.append("Chennai")
-
     seen = set()
     res: list[str] = []
     for t in terms:
@@ -1097,7 +1114,7 @@ def _get_rto_search_terms(rto: str) -> list[str]:
         if t_clean and t_clean.lower() not in seen and len(t_clean) >= 2:
             seen.add(t_clean.lower())
             res.append(t_clean)
-    return res or ["TN-01", "Chennai"]
+    return res
 
 
 def _score_rto_option(option_text: str, target: str) -> int:
@@ -1320,17 +1337,6 @@ def _pick_rto(page: Page, logger: logging.Logger, rto: str) -> str | None:
                     logger.info("Ex-showroom price is visible after RTO selection: '%s'", best_text)
                     return best_text
 
-                # Fallback: if we selected a known TN-01 / Chennai RTO, set Zone='A' if still blank
-                if any(k in best_text.lower() for k in ("chennai", "tn-01", "tn01", "tamil nadu")):
-                    page.evaluate("""() => {
-                        const z = document.getElementById('Vehicle_Zone') || document.querySelector('input[name*="Zone"]');
-                        if (z && !z.value.trim()) {
-                            z.value = 'A';
-                            ['input', 'change'].forEach(ev => z.dispatchEvent(new Event(ev, { bubbles: true })));
-                        }
-                    }""")
-                    logger.info("Set fallback Zone='A' for Chennai/TN-01 RTO.")
-
                 return best_text
 
         except Exception as exc:
@@ -1348,7 +1354,7 @@ def _trace_model_details(page: Page, logger: logging.Logger, state: dict, stage:
     state["loaded"] = loaded
 
 
-def _auto_idv(page: Page, logger: logging.Logger, percent: float = 95.0) -> str:
+def _auto_idv(page: Page, logger: logging.Logger, percent: float) -> str:
     """IDV for a new vehicle as a percentage of the ex-showroom price shown on the form."""
     try:
         text = page.evaluate("""() => {
@@ -1702,166 +1708,248 @@ def _select_vehicle_dropdown(page: Page, logger: logging.Logger, label: str, val
 
 
 # ---------------------------------------------------------------------------
-# Environment → input builders (with dynamic defaults and dictionary overrides)
+# Database → input builders
 # ---------------------------------------------------------------------------
 
-def _load_db_row() -> dict | None:
-    """Load the latest active scrape_input row from DB; return None on any error."""
-    try:
-        from db.scrape_input_client import get_latest_scrape_input
-        row = get_latest_scrape_input()
-        if row:
-            logging.getLogger("scrape_api").info(
-                "[DB] Loaded scrape_input id=%s — form will be populated from DB row.", row.get("id")
-            )
-        else:
-            logging.getLogger("scrape_api").info(
-                "[DB] No active scrape_input row found — using .env fallbacks."
-            )
-        return row
-    except Exception as exc:
-        logging.getLogger("scrape_api").warning(
-            "[DB] Could not load scrape_input (falling back to .env): %s", exc
+def _load_db_row() -> dict:
+    """Load the latest active scrape row; fail instead of using local fallbacks."""
+    from db.scrape_input_client import get_latest_scrape_input
+
+    row = get_latest_scrape_input()
+    if row is None:
+        raise RuntimeError("No active scrape-input row exists in the database.")
+    logging.getLogger("scrape_api").info(
+        "[DB] Loaded active scrape-input id=%s.", row.get("id")
+    )
+    return row
+
+
+def _required_db_value(db: dict, key: str) -> str:
+    value = db.get(key)
+    if value is None or not str(value).strip():
+        raise ValueError(f"Active DB scrape-input is missing required value: {key}")
+    return str(value).strip()
+
+
+def _optional_db_value(db: dict, key: str) -> str:
+    value = db.get(key)
+    return "" if value is None else str(value).strip()
+
+
+def _required_db_bool(db: dict, key: str) -> bool:
+    value = db.get(key)
+    if not isinstance(value, bool):
+        raise ValueError(f"Active DB scrape-input is missing boolean value: {key}")
+    return value
+
+
+def _validate_db_workflow(db: dict) -> None:
+    flow_flags = (
+        "continue_to_buy", "validate_customer", "upload_document",
+        "save_proposal", "proceed_to_payment",
+        "click_get_coverage_details", "click_calculate_premium",
+    )
+    for key in flow_flags:
+        _required_db_bool(db, key)
+
+    proposal_actions = (
+        db["upload_document"], db["save_proposal"], db["proceed_to_payment"]
+    )
+    if any(proposal_actions) and not db["continue_to_buy"]:
+        raise ValueError(
+            "Active DB row enables proposal actions while continue_to_buy is false."
         )
-        return None
+    if any(proposal_actions) and not db["validate_customer"]:
+        raise ValueError(
+            "Active DB row enables proposal actions while validate_customer is false."
+        )
+    if db["continue_to_buy"] and not db["click_get_coverage_details"]:
+        raise ValueError(
+            "Active DB row enables continue_to_buy without Get Coverage Details."
+        )
+    if db["continue_to_buy"] and not db["click_calculate_premium"]:
+        raise ValueError(
+            "Active DB row enables continue_to_buy without premium calculation."
+        )
+    if db["proceed_to_payment"] and not db["save_proposal"]:
+        raise ValueError(
+            "Active DB row enables payment without saving the proposal."
+        )
+
+    if db["continue_to_buy"]:
+        for key in ("cust_first_name", "cust_last_name"):
+            _required_db_value(db, key)
+        if db["validate_customer"]:
+            for key in ("engine_number", "chassis_number"):
+                _required_db_value(db, key)
+        if db["validate_customer"] and db["cover_pa_to_owner_driver"]:
+            for key in ("nominee_name", "nominee_dob", "nominee_relation", "nominee_age"):
+                _required_db_value(db, key)
+        if db["upload_document"]:
+            _required_db_value(db, "upload_doc_type")
+            document_path = pathlib.Path(
+                _required_db_value(db, "upload_doc_path")
+            )
+            if not document_path.is_absolute():
+                document_path = pathlib.Path(__file__).resolve().parents[1] / document_path
+            if not document_path.is_file():
+                raise FileNotFoundError(
+                    f"Document configured in the active DB row does not exist: {document_path}"
+                )
+        if db["proceed_to_payment"] and not db["save_proposal"]:
+            raise ValueError(
+                "Active DB scrape-input cannot proceed to payment when save_proposal is false."
+            )
 
 
-def _dbv(db: dict | None, key: str):
-    """Return db[key] if db is not None AND the key exists with a non-None value, else None."""
-    if db is None:
-        return None
-    return db.get(key)  # may be False/0/empty-string — caller decides
+def _build_vehicle_input(db: dict) -> VehicleFormInput:
+    try:
+        discount = int(_required_db_value(db, "discount_percent"))
+    except ValueError as exc:
+        raise ValueError("Active DB scrape-input discount_percent must be an integer.") from exc
+    model = _clean_model_string(_required_db_value(db, "make_model_variant"))
+    if not model:
+        raise ValueError("Active DB scrape-input make_model_variant is invalid.")
+    idv = _required_db_value(db, "idv")
+    try:
+        idv_number = idv.split(":", 1)[1] if idv.lower().startswith("auto:") else idv
+        if idv.lower() == "auto" or float(idv_number) <= 0:
+            raise ValueError
+    except ValueError as exc:
+        raise ValueError(
+            "Active DB scrape-input idv must be a positive number or auto:<percentage>."
+        ) from exc
 
-
-def _str_field(o: dict, api_key: str, db: dict | None, db_key: str, env_key: str, default: str = "") -> str:
-    """API override > DB row > .env > hardcoded default."""
-    v = o.get(api_key)
-    if v is not None and str(v).strip():
-        return str(v)
-    dv = _dbv(db, db_key)
-    if dv is not None and str(dv).strip():
-        return str(dv)
-    return str(os.getenv(env_key, default))
-
-
-def _bool_field(o: dict, api_key: str, db: dict | None, db_key: str, env_key: str, default: bool = True) -> bool:
-    """API override > DB row > .env > hardcoded default. Handles bool False correctly."""
-    if api_key in o and o[api_key] is not None:
-        v = o[api_key]
-        if isinstance(v, bool):
-            return v
-        return str(v).lower() in ("true", "1", "yes")
-    if db is not None and db_key in db and db[db_key] is not None:
-        v = db[db_key]
-        if isinstance(v, bool):
-            return v
-        return str(v).lower() in ("true", "1", "yes")
-    env_v = os.getenv(env_key)
-    if env_v is not None:
-        return env_v.strip().lower() in ("true", "1", "yes")
-    return default
-
-
-def _build_vehicle_input(overrides: dict | None = None, _db_row: dict | None = None) -> VehicleFormInput:
-    """Build VehicleFormInput. Priority: API overrides > DB row > .env > defaults."""
-    o = overrides or {}
-    db = _db_row
-
-    vehicle = VehicleFormInput(
-        registration_number=_str_field(o, "registration_number", db, "registration_number", "VEH_REG_NUMBER", ""),
-        rto_location=_str_field(o, "rto_location", db, "rto_location", "VEH_RTO_LOCATION", ""),
-        manufacturing_year=_str_field(o, "manufacturing_year", db, "manufacturing_year", "VEH_MFG_YEAR", ""),
-        manufacturing_month=_str_field(o, "manufacturing_month", db, "manufacturing_month", "VEH_MFG_MONTH", ""),
-        purchase_registration_date=_str_field(
-            o, "purchase_registration_date", db, "purchase_date", "VEH_PURCHASE_DATE",
-            str(o.get("purchase_date", "")),
-        ),
-        policy_start_date=_str_field(o, "policy_start_date", db, "policy_start_date", "VEH_POLICY_START_DATE", ""),
-        make_model_variant=_clean_model_string(_str_field(o, "make_model_variant", db, "make_model_variant", "VEH_MAKE_MODEL_VARIANT", "TVS JUPITER")),
-        idv=_str_field(o, "idv", db, "idv", "VEH_IDV", ""),
-        fuel_type=_str_field(o, "fuel_type", db, "fuel_type", "VEH_FUEL_TYPE", "Petrol"),
-        business_type=_str_field(o, "business_type", db, "business_type", "VEH_BUSINESS_TYPE", "New"),
-        customer_type=_str_field(o, "customer_type", db, "customer_type", "VEH_CUSTOMER_TYPE", "Individual"),
-        ncb_eligibility=_str_field(
-            o, "ncb_eligibility", db, "ncb_eligibility", "VEH_NCB",
-            str(o.get("ncb", "None")),
-        ),
-        data_discount_percent=int(_str_field(
-            o, "data_discount_percent", db, "discount_percent", "VEH_DISCOUNT",
-            str(o.get("discount", "0")),
-        ) or "0"),
-        is_new_vehicle=_bool_field(o, "is_new_vehicle", db, "is_new_vehicle", "VEH_IS_NEW_VEHICLE", True),
-        engine_number=_str_field(o, "engine_number", db, "engine_number", "VEH_ENGINE_NUMBER", "JA12E3456789"),
-        chassis_number=_str_field(o, "chassis_number", db, "chassis_number", "VEH_CHASSIS_NUMBER", "MD625BG45M1234567"),
+    policy_start_date = _normalize_policy_start_date(
+        _required_db_value(db, "policy_start_date")
     )
-    # Apply dynamic defaults for any blank date/year/month fields
-    vehicle.apply_dynamic_defaults()
-    return vehicle
+    return VehicleFormInput(
+        registration_number=_required_db_value(db, "registration_number"),
+        rto_location=_required_db_value(db, "rto_location"),
+        manufacturing_year=_required_db_value(db, "manufacturing_year"),
+        manufacturing_month=_required_db_value(db, "manufacturing_month"),
+        purchase_registration_date=_required_db_value(db, "purchase_date"),
+        policy_start_date=policy_start_date,
+        make_model_variant=model,
+        idv=idv,
+        fuel_type=_required_db_value(db, "fuel_type"),
+        business_type=_required_db_value(db, "business_type"),
+        customer_type=_required_db_value(db, "customer_type"),
+        ncb_eligibility=_required_db_value(db, "ncb_eligibility"),
+        data_discount_percent=discount,
+        is_new_vehicle=_required_db_bool(db, "is_new_vehicle"),
+        engine_number=_optional_db_value(db, "engine_number"),
+        chassis_number=_optional_db_value(db, "chassis_number"),
+        seating_capacity=_optional_db_value(db, "seating_capacity"),
+        vehicle_segment=_optional_db_value(db, "vehicle_segment"),
+    )
 
 
-def _build_cover_details_input(overrides: dict | None = None, _db_row: dict | None = None) -> CoverDetailsInput:
-    """Build Cover Details options. Priority: API overrides > DB row > .env > defaults."""
-    o = overrides or {}
-    db = _db_row
+def _normalize_policy_start_date(value: str, today: date | None = None) -> str:
+    """Validate the DB policy date against the portal's no-past-date rule."""
+    parsed = None
+    for date_format in ("%d-%m-%Y", "%Y-%m-%d"):
+        try:
+            parsed = datetime.strptime(value, date_format).date()
+            break
+        except ValueError:
+            continue
+    if parsed is None:
+        raise ValueError(
+            "Active DB scrape-input policy_start_date must use DD-MM-YYYY or YYYY-MM-DD."
+        )
 
-    tppd_limit = _str_field(o, "tppd_limit", db, "cover_tppd_limit", "COVER_TPPD_LIMIT", "6000")
-    cpa_tenure = _str_field(o, "cpa_tenure", db, "cover_cpa_tenure", "COVER_CPA_TENURE", "1")
+    if parsed < (today or date.today()):
+        raise ValueError(
+            f"Active DB scrape-input policy_start_date '{value}' is in the past; "
+            "enter today or a future date in the database."
+        )
+    return parsed.strftime("%d-%m-%Y")
 
+
+def _build_cover_details_input(db: dict) -> CoverDetailsInput:
+    boolean_fields = (
+        "basic_od", "non_electrical_accessories", "electrical_accessories",
+        "geo_extension", "driving_tuition", "fibre_glass_tank",
+        "voluntary_deductible", "anti_theft_device", "specially_designed",
+        "automobile_association", "tppd", "basic_liability",
+        "pa_to_owner_driver", "pa_to_named_passenger",
+        "pa_to_unnamed_passenger", "pa_to_paid_driver",
+        "liability_to_paid_driver", "liability_to_employees",
+        "nil_depreciation", "electric_motor_protect", "ev_battery_protection",
+        "ev_charger_cover", "hospi_cash_30", "hospi_cash_15",
+        "emergency_medical", "assistance_cover_tw_shield",
+        "assistance_cover_tw", "assistance_cover_24x7", "key_protect",
+        "daily_allowance_7days", "emi_protection", "is_side_car",
+    )
+    values = {
+        field: _required_db_bool(db, f"cover_{field}")
+        for field in boolean_fields
+    }
+    if values["nil_depreciation"]:
+        values["nil_depreciation_first_time"] = _required_db_bool(
+            db, "cover_nil_depreciation_first_time"
+        )
+    else:
+        values["nil_depreciation_first_time"] = db.get(
+            "cover_nil_depreciation_first_time"
+        )
     return CoverDetailsInput(
-        nil_depreciation=_bool_field(o, "nil_depreciation", db, "cover_nil_depreciation", "COVER_NIL_DEPRECIATION", True),
-        pa_to_owner_driver=_bool_field(o, "pa_to_owner_driver", db, "cover_pa_to_owner_driver", "COVER_PA_OWNER_DRIVER", True),
-        tppd_limit=tppd_limit or "6000",
-        cpa_tenure=cpa_tenure or "1",
+        **values,
+        tppd_limit=_required_db_value(db, "cover_tppd_limit"),
+        cpa_tenure=_required_db_value(db, "cover_cpa_tenure"),
     )
 
 
-def _build_customer_input(overrides: dict | None = None, _db_row: dict | None = None) -> CustomerInput:
-    """Build CustomerInput. Priority: API overrides > DB row > .env > defaults."""
-    o = overrides or {}
-    db = _db_row
-
+def _build_customer_input(db: dict) -> CustomerInput:
     return CustomerInput(
-        first_name=_str_field(o, "first_name", db, "cust_first_name", "CUST_FIRST_NAME", ""),
-        middle_name=_str_field(o, "middle_name", db, "cust_middle_name", "CUST_MIDDLE_NAME", ""),
-        last_name=_str_field(o, "last_name", db, "cust_last_name", "CUST_LAST_NAME", ""),
-        dob=_str_field(o, "dob", db, "cust_dob", "CUST_DOB", ""),
-        pan=_str_field(o, "pan", db, "cust_pan", "CUST_PAN", ""),
-        gender=_str_field(o, "gender", db, "cust_gender", "CUST_GENDER", "Male"),
-        occupation=_str_field(o, "occupation", db, "cust_occupation", "CUST_OCCUPATION", "Others"),
-        marital_status=_str_field(o, "marital_status", db, "cust_marital_status", "CUST_MARITAL_STATUS", "Single"),
-        mobile=_str_field(o, "mobile", db, "cust_mobile", "CUST_MOBILE", ""),
-        email=_str_field(o, "email", db, "cust_email", "CUST_EMAIL", ""),
-        aadhar=_str_field(o, "aadhar", db, "cust_aadhar", "CUST_AADHAR", ""),
-        nationality=_str_field(o, "nationality", db, "cust_nationality", "CUST_NATIONALITY", "Indian"),
-        registered_under_gst=_str_field(o, "registered_under_gst", db, "cust_registered_gst", "CUST_GST", "No"),
-        related_party=_str_field(o, "related_party", db, "cust_related_party", "CUST_RELATED_PARTY", "No"),
-        nominee_name=_str_field(o, "nominee_name", db, "nominee_name", "NOMINEE_NAME", "Murugan"),
-        nominee_dob=_str_field(o, "nominee_dob", db, "nominee_dob", "NOMINEE_DOB", "01-01-1975"),
-        nominee_relation=_str_field(o, "nominee_relation", db, "nominee_relation", "NOMINEE_RELATION", "Father"),
-        nominee_age=_str_field(o, "nominee_age", db, "nominee_age", "NOMINEE_AGE", "49"),
+        customer_type=_required_db_value(db, "customer_type"),
+        first_name=_optional_db_value(db, "cust_first_name"),
+        middle_name=_optional_db_value(db, "cust_middle_name"),
+        last_name=_optional_db_value(db, "cust_last_name"),
+        dob=_optional_db_value(db, "cust_dob"),
+        pan=_optional_db_value(db, "cust_pan"),
+        gender=_optional_db_value(db, "cust_gender"),
+        occupation=_optional_db_value(db, "cust_occupation"),
+        marital_status=_optional_db_value(db, "cust_marital_status"),
+        mobile=_optional_db_value(db, "cust_mobile"),
+        email=_optional_db_value(db, "cust_email"),
+        aadhar=_optional_db_value(db, "cust_aadhar"),
+        nationality=_optional_db_value(db, "cust_nationality"),
+        registered_under_gst=_optional_db_value(db, "cust_registered_gst"),
+        related_party=_optional_db_value(db, "cust_related_party"),
+        nominee_name=_optional_db_value(db, "nominee_name"),
+        nominee_dob=_optional_db_value(db, "nominee_dob"),
+        nominee_relation=_optional_db_value(db, "nominee_relation"),
+        nominee_age=_optional_db_value(db, "nominee_age"),
     )
 
 
-def _build_address_input(overrides: dict | None = None, _db_row: dict | None = None) -> AddressInput:
-    """Build AddressInput. Priority: API overrides > DB row > .env > defaults."""
-    o = overrides or {}
-    db = _db_row
-
-    mobile = _str_field(o, "mobile", db, "cust_mobile", "CUST_MOBILE", "")
-    email = _str_field(o, "email", db, "addr_email", "CUST_EMAIL", "")
-
+def _build_address_input(db: dict) -> AddressInput:
+    mobile = _optional_db_value(db, "addr_mobile") or _optional_db_value(db, "cust_mobile")
+    email = _optional_db_value(db, "addr_email") or _optional_db_value(db, "cust_email")
     return AddressInput(
-        flat=_str_field(o, "flat", db, "addr_flat", "CUST_FLAT", ""),
-        building=_str_field(o, "building", db, "addr_building", "CUST_BUILDING", ""),
-        street=_str_field(o, "street", db, "addr_street", "CUST_STREET", ""),
-        landmark=_str_field(o, "landmark", db, "addr_landmark", "CUST_LANDMARK", ""),
-        pincode=_str_field(o, "pincode", db, "addr_pincode", "CUST_PINCODE", ""),
-        state=_str_field(o, "state", db, "addr_state", "CUST_STATE", ""),
-        city=_str_field(o, "city", db, "addr_city", "CUST_CITY", ""),
+        flat=_optional_db_value(db, "addr_flat"),
+        building=_optional_db_value(db, "addr_building"),
+        street=_optional_db_value(db, "addr_street"),
+        landmark=_optional_db_value(db, "addr_landmark"),
+        pincode=_optional_db_value(db, "addr_pincode"),
+        state=_optional_db_value(db, "addr_state"),
+        city=_optional_db_value(db, "addr_city"),
         mobile=mobile,
         email=email,
-        same_as_comm=_bool_field(o, "same_as_comm", db, "addr_perm_same_as_comm", "CUST_PERM_SAME_AS_COMM", True),
+        same_as_comm=_required_db_bool(db, "addr_perm_same_as_comm"),
     )
+
+
+def _wait_for_browser_review(page: Page, logger: logging.Logger, seconds: int) -> None:
+    if seconds <= 0:
+        return
+    logger.info("Keeping the browser open for %d s before closing.", seconds)
+    try:
+        page.wait_for_timeout(seconds * 1000)
+    except KeyboardInterrupt:
+        logger.info("Browser review interrupted; closing the browser.")
 
 
 # ---------------------------------------------------------------------------
@@ -2121,6 +2209,7 @@ def _fill_vehicle_details(
     page: Page,
     vehicle: VehicleFormInput,
     logger: logging.Logger,
+    click_get_coverage_details: bool,
 ) -> None:
     """Fill all fields on the Vehicle Details form and click Get Coverage Details."""
     _snap(page, "form-before-fill", logger)
@@ -2153,11 +2242,14 @@ def _fill_vehicle_details(
         _trace_model_details(page, logger, model_trace, "right after the model was picked")
 
     if vehicle.make_model_variant and not model_picked:
-        logger.warning("Make/Model not picked on first pass — retrying with default make/model...")
-        default_model = os.getenv("VEH_MAKE_MODEL_VARIANT", "TVS JUPITER").strip()
-        model_picked = _pick_model(page, logger, default_model)
+        logger.warning("Make/Model not picked on first pass — retrying the DB-provided model.")
+        model_picked = _pick_model(page, logger, vehicle.make_model_variant)
         if model_picked:
             vehicle.make_model_variant = model_picked
+        else:
+            raise RuntimeError(
+                "Could not select the make/model variant from the active DB row."
+            )
 
     # ── Wait for AJAX-populated Kendo dropdowns to appear in DOM ─────
     # After Make/Model selection the site fires an AJAX call that injects
@@ -2237,17 +2329,20 @@ def _fill_vehicle_details(
 
     # ── RTO Location (autocomplete) ───────────────────────────────────────
     rto_picked = None
-    rto_target = vehicle.rto_location or os.getenv("VEH_RTO_LOCATION", "TN-01").strip()
-    if rto_target:
+    rto_target = vehicle.rto_location
+    rto_picked = _pick_rto(page, logger, rto_target)
+    if rto_picked:
+        vehicle.rto_location = rto_picked
+
+    if not rto_picked:
+        logger.warning("RTO not picked on first pass — retrying the DB-provided location.")
         rto_picked = _pick_rto(page, logger, rto_target)
         if rto_picked:
             vehicle.rto_location = rto_picked
-
-    if not rto_picked:
-        logger.warning("RTO not picked on first pass — retrying with default RTO 'TN-01'...")
-        rto_picked = _pick_rto(page, logger, "TN-01")
-        if rto_picked:
-            vehicle.rto_location = rto_picked
+        else:
+            raise RuntimeError(
+                "Could not select the RTO location from the active DB row."
+            )
 
     _trace_model_details(page, logger, model_trace, "after choosing the RTO location")
 
@@ -2320,30 +2415,16 @@ def _fill_vehicle_details(
           "input[id*='RegDate']", "input[placeholder*='Registration']")
     page.wait_for_timeout(200)
 
-    # ── Customer Type (radio: Individual / Corporate) ───────────────────────
-    try:
-        cust_radio = page.locator(
-            "input#CustomerTypeIndividual, "
-            "input[name='objClient.ClientType'][value='True']"
-        ).first
-        if cust_radio.count():
-            cust_radio.check(force=True)
-            logger.info("Selected Customer Type = 'Individual' via radio.")
-        else:
-            # JS fallback
-            page.evaluate("""() => {
-                const r = document.querySelector("input[id='CustomerTypeIndividual'], input[name*='ClientType'][value='True']");
-                if (r) { r.checked = true; r.dispatchEvent(new Event('change',{bubbles:true}));
-                    if (window.jQuery) window.jQuery(r).trigger('change').trigger('click'); }
-            }""")
-            logger.info("Selected Customer Type = 'Individual' via JS fallback.")
-    except Exception as exc:
-        logger.warning("Could not set Customer Type: %s", exc)
+    # ── Customer Type ─────────────────────────────────────────────────────
+    if not _select_customer_type(page, vehicle.customer_type):
+        raise RuntimeError(
+            f"Could not select DB customer_type '{vehicle.customer_type}'."
+        )
+    logger.info("Selected Customer Type = '%s'.", vehicle.customer_type)
     page.wait_for_timeout(200)
 
     # ── IDV ───────────────────────────────────────────────────────────────
-    # VEH_IDV may be a number, or "auto" / "auto:<percent>" to derive it from the
-    # ex-showroom price the site shows (default 95 %, the usual new-vehicle IDV).
+    # The DB may provide a number or "auto:<percent>" to derive IDV from ex-showroom price.
     idv_range = None
     for _ in range(8):
         idv_range = page.evaluate("""() => {
@@ -2362,13 +2443,12 @@ def _fill_vehicle_details(
     if idv_range:
         logger.info("Detected site IDV range: %s (min=%d, max=%d)", idv_range["raw"], idv_range["min"], idv_range["max"])
 
-    idv_value = (vehicle.idv or "").strip()
-    if not idv_value or idv_value.lower().startswith("auto"):
-        try:
-            percent = float(idv_value.split(":", 1)[1]) if ":" in idv_value else 95.0
-        except ValueError:
-            percent = 95.0
+    idv_value = vehicle.idv.strip()
+    if idv_value.lower().startswith("auto:"):
+        percent = float(idv_value.split(":", 1)[1])
         idv_value = _auto_idv(page, logger, percent)
+    if not idv_value:
+        raise RuntimeError("The active DB row did not produce an IDV value.")
 
     # Clamping: if site specifies a valid IDV range, ensure idv_value falls within it
     if idv_range and idv_range.get("max", 0) > 7000:
@@ -2382,8 +2462,8 @@ def _fill_vehicle_details(
             elif cur_idv > max_allowed:
                 logger.warning("Configured IDV %d is above site max %d; clamping to max.", cur_idv, max_allowed)
                 idv_value = str(max_allowed)
-        except Exception:
-            idv_value = str((min_allowed + max_allowed) // 2)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("The active DB row contains an invalid IDV value.") from exc
 
     if idv_value:
         _fill(page, logger, "idv", idv_value,
@@ -2474,6 +2554,10 @@ def _fill_vehicle_details(
         "a:has-text('Ex showroom')")
     if ex_price:
         logger.info("Ex-showroom price detected: %s", ex_price)
+
+    if not click_get_coverage_details:
+        logger.info("Skipping Get Coverage Details per the active DB row.")
+        return
 
     # ── Click Get Coverage Details ────────────────────────────────────────
     logger.info("Clicking 'Get Coverage Details' button.")
@@ -2579,6 +2663,13 @@ def _fill_vehicle_details(
     )
     cover_ready = False
     for step_i in range(90):   # up to ~45 s
+        if step_i % 4 == 0:
+            site_errors = _site_error_lines(page)
+            if site_errors:
+                raise SiteRejectedQuote(
+                    "The insurer rejected the vehicle details: "
+                    + " | ".join(site_errors)
+                )
         try:
             if any(calc_button.nth(i).is_visible() for i in range(calc_button.count())):
                 cover_ready = True
@@ -2608,8 +2699,15 @@ def _fill_vehicle_details(
     if cover_ready:
         logger.info("Cover Details section loaded.")
     else:
-        logger.warning("Cover Details section did not load within 45 s.")
-        _log_site_messages(page, logger, "Cover Details did not load", watch_ms=600)
+        site_errors = _site_error_lines(page)
+        if site_errors:
+            raise SiteRejectedQuote(
+                "The insurer rejected the vehicle details: "
+                + " | ".join(site_errors)
+            )
+        raise RuntimeError(
+            "Cover Details did not load: the Calculate Premium action is unavailable."
+        )
     page.wait_for_timeout(1000)
 
     # The site reports business errors as plain text inside the section.
@@ -2626,8 +2724,8 @@ def _fill_vehicle_details(
 # Step 3 — Scrape & Fill Cover Details (OD Package, Liability, AddOns)
 # ---------------------------------------------------------------------------
 
-def _select_tppd_limit(page: Page, logger: logging.Logger, limit_value: str = "6000") -> bool:
-    """Select the TPPD Limit in Cover Details (e.g. '6000')."""
+def _select_tppd_limit(page: Page, logger: logging.Logger, limit_value: str) -> bool:
+    """Select the TPPD Limit from the active DB row."""
     needle = str(limit_value).strip()
     logger.info("Setting TPPD Limit dropdown to '%s'...", needle)
 
@@ -2692,8 +2790,8 @@ def _select_tppd_limit(page: Page, logger: logging.Logger, limit_value: str = "6
     return False
 
 
-def _select_cpa_tenure(page: Page, logger: logging.Logger, tenure_value: str = "1") -> bool:
-    """Select CPA Tenure in Cover Details (e.g. '1')."""
+def _select_cpa_tenure(page: Page, logger: logging.Logger, tenure_value: str) -> bool:
+    """Select CPA Tenure from the active DB row."""
     needle = str(tenure_value).strip()
     logger.info("Setting CPA Tenure dropdown to '%s'...", needle)
     res = page.evaluate("""({needle}) => {
@@ -2723,124 +2821,113 @@ def _select_cpa_tenure(page: Page, logger: logging.Logger, tenure_value: str = "
     return False
 
 
-def _configure_cover_checkboxes(page: Page, logger: logging.Logger) -> list[dict]:
-    """Configure all cover checkboxes to match the specified figure exactly:
-    Checked:
-      - Basic OD
-      - TPPD
-      - Basic Liability
-      - PA to Owner Driver
-      - Nil Depreciation
-    All other checkboxes:
-      - UNCHECKED (e.g. Helmet Cover, Hospi Cash, Accessories, etc.)
-    """
-    logger.info("Configuring cover checkboxes according to specified figure...")
-    result = page.evaluate("""() => {
+def _configure_cover_checkboxes(
+    page: Page,
+    logger: logging.Logger,
+    cover_input: CoverDetailsInput,
+) -> list[dict]:
+    """Set recognized cover checkboxes to the values loaded from the DB."""
+    cover_fields = (
+        ("basic_od", ("basic od",)),
+        ("non_electrical_accessories", ("non electrical", "non-electrical")),
+        ("electrical_accessories", ("electrical accessories", "electrical accessory")),
+        ("geo_extension", ("geo extension",)),
+        ("driving_tuition", ("driving tuition",)),
+        ("fibre_glass_tank", ("fibre glass", "fiberglass")),
+        ("voluntary_deductible", ("voluntary deductible",)),
+        ("anti_theft_device", ("anti theft", "anti-theft")),
+        ("specially_designed", ("specially designed",)),
+        ("automobile_association", ("automobile association",)),
+        ("tppd", ("tppd",)),
+        ("basic_liability", ("basic liability",)),
+        ("pa_to_owner_driver", ("pa to owner driver", "pa to owner")),
+        ("pa_to_named_passenger", ("pa to named passenger",)),
+        ("pa_to_unnamed_passenger", ("pa to unnamed passenger",)),
+        ("pa_to_paid_driver", ("pa to paid driver",)),
+        ("liability_to_paid_driver", ("liability to paid driver",)),
+        ("liability_to_employees", ("liability to employees",)),
+        ("nil_depreciation", ("nil depreciation", "nil dep")),
+        ("electric_motor_protect", ("electric motor",)),
+        ("ev_battery_protection", ("battery protection",)),
+        ("ev_charger_cover", ("charger cover",)),
+        ("hospi_cash_30", ("hospi cash 30",)),
+        ("hospi_cash_15", ("hospi cash 15",)),
+        ("emergency_medical", ("emergency medical",)),
+        ("assistance_cover_tw_shield", ("tw shield",)),
+        ("assistance_cover_tw", ("assistance cover tw",)),
+        ("assistance_cover_24x7", ("24x7", "24 x 7")),
+        ("key_protect", ("key protect",)),
+        ("daily_allowance_7days", ("daily allowance",)),
+        ("emi_protection", ("emi protection",)),
+        ("is_side_car", ("side car",)),
+    )
+    preferences = [
+        {"field": field, "value": getattr(cover_input, field), "terms": list(terms)}
+        for field, terms in cover_fields
+    ]
+    result = page.evaluate("""(preferences) => {
         const changes = [];
-        // Names/keywords of covers that MUST be checked
-        const mustBeChecked = [
-            'basic od',
-            'tppd',
-            'basic liability',
-            'pa to owner driver',
-            'pa to owner',
-            'nil depreciation'
-        ];
-
-        // Find all checkboxes on the page
-        const allCheckboxes = Array.from(document.querySelectorAll('input[type="checkbox"]'));
-
-        for (const cb of allCheckboxes) {
-            // Exclude checkboxes that belong to vehicle details or proposal sections
+        const found = new Set();
+        const normalize = value => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+        const checkboxes = Array.from(document.querySelectorAll('input[type="checkbox"]'));
+        for (const cb of checkboxes) {
             const id = (cb.id || '').toLowerCase();
             const name = (cb.name || '').toLowerCase();
             if (id.includes('newvehicle') || id.includes('bhvehicle') || id.includes('isbh') ||
-                id.includes('permanent') || id.includes('pan') || name.includes('newvehicle')) {
-                continue;
-            }
+                id.includes('permanent') || id.includes('pan') || name.includes('newvehicle')) continue;
 
-            // Find the label or text of this checkbox
-            let label = '';
-            if (cb.id) {
-                const lbl = document.querySelector(`label[for="${cb.id}"]`);
-                if (lbl && lbl.innerText.trim()) label = lbl.innerText.trim();
-            }
-            if (!label) {
-                const parent = cb.closest('td') || cb.closest('label') || cb.parentElement;
-                if (parent) label = parent.innerText.trim();
-            }
+            const labelElement = cb.id ? document.querySelector(`label[for="${cb.id}"]`) : null;
+            const parent = cb.closest('td') || cb.closest('label') || cb.parentElement;
+            const label = (labelElement && labelElement.innerText.trim()) ||
+                (parent && parent.innerText.trim()) || '';
+            const normalizedLabel = normalize(label);
+            const matches = preferences.filter(pref =>
+                pref.terms.some(term => normalizedLabel.includes(normalize(term))) &&
+                !(pref.field === 'electrical_accessories' && normalizedLabel.includes('non electrical')) &&
+                !(pref.field === 'assistance_cover_tw' && normalizedLabel.includes('shield'))
+            );
+            const bestScore = Math.max(0, ...matches.map(pref =>
+                Math.max(...pref.terms.map(term =>
+                    normalizedLabel.includes(normalize(term)) ? normalize(term).length : 0
+                ))
+            ));
+            const bestMatches = matches.filter(pref =>
+                Math.max(...pref.terms.map(term =>
+                    normalizedLabel.includes(normalize(term)) ? normalize(term).length : 0
+                )) === bestScore
+            );
+            if (bestMatches.length !== 1 || bestScore === 0) continue;
 
-            const labelLower = label.toLowerCase();
-            if (!labelLower) continue;
-
-            // Only operate on covers that belong to Cover Details
-            const isCoverCheckbox = [
-                'basic od', 'accessories', 'geo extension', 'driving', 'fibre glass',
-                'deductible', 'anti-theft', 'challenged', 'automobile',
-                'tppd', 'basic liability', 'pa to owner', 'pa to named', 'pa to unnamed',
-                'pa to paid', 'liability to', 'electric', 'battery', 'charger',
-                'hospi', 'medical', 'assistance', 'rsa', 'key protect', 'allowance',
-                'nil dep', 'depreciation', 'emi', 'engine', 'tyre', 'return to invoice',
-                'limit sure', 'helmet', 'side car'
-            ].some(k => labelLower.includes(k));
-
-            if (!isCoverCheckbox) continue;
-
-            const shouldCheck = mustBeChecked.some(k => labelLower.includes(k));
-
-            if (shouldCheck && !cb.checked) {
+            const preference = bestMatches[0];
+            found.add(preference.terms[0]);
+            if (cb.checked !== preference.value) {
                 cb.click();
-                if (!cb.checked) {
-                    cb.checked = true;
+                if (cb.checked !== preference.value) {
+                    cb.checked = preference.value;
                     cb.dispatchEvent(new Event('input', { bubbles: true }));
                     cb.dispatchEvent(new Event('change', { bubbles: true }));
                 }
-                if (window.jQuery) {
-                    window.jQuery(cb).prop('checked', true).trigger('change');
-                }
-                changes.push({ label, action: 'checked' });
-            } else if (!shouldCheck && cb.checked) {
-                cb.click();
-                if (cb.checked) {
-                    cb.checked = false;
-                    cb.dispatchEvent(new Event('input', { bubbles: true }));
-                    cb.dispatchEvent(new Event('change', { bubbles: true }));
-                }
-                if (window.jQuery) {
-                    window.jQuery(cb).prop('checked', false).trigger('change');
-                }
-                changes.push({ label, action: 'unchecked' });
-            } else {
-                changes.push({ label, action: cb.checked ? 'kept_checked' : 'kept_unchecked' });
+                if (window.jQuery) window.jQuery(cb).prop('checked', preference.value).trigger('change');
             }
+            changes.push({label, checked: cb.checked});
         }
-        return changes;
-    }""")
-
-    logger.info("Cover configuration result: %s", [c for c in result if c.get("action") in ("checked", "unchecked")])
+        return {
+            changes,
+            missing: preferences.filter(pref => !found.has(pref.terms[0])).map(pref => pref.terms[0])
+        };
+    }""", preferences)
+    logger.info("DB cover checkbox values applied: %s", result.get("changes", []))
+    if result.get("missing"):
+        logger.warning("DB cover values not found on the page: %s", result["missing"])
     page.wait_for_timeout(800)
-
-    # Ensure Nil Depreciation Rate is populated / verified
-    try:
-        nil_rate_el = page.locator(
-            "input[id*='NilDepreciationRate'], input[id*='nilDepRate'], input[name*='NilDepreciation']"
-        ).first
-        if nil_rate_el.count() and nil_rate_el.is_visible():
-            val = nil_rate_el.input_value().strip()
-            if not val:
-                nil_rate_el.fill("0.3")
-                logger.info("Cover Details: Filled Nil Depreciation Rate = '0.3'")
-            else:
-                logger.info("Cover Details: Nil Depreciation Rate = '%s'", val)
-    except Exception as exc:
-        logger.debug("Nil rate check: %s", exc)
-
-    return result
+    return result.get("changes", [])
 
 
 def _scrape_and_fill_cover_details(
     page: Page,
     cover_input: CoverDetailsInput,
+    get_coverage_details: bool,
+    calculate_premium: bool,
     logger: logging.Logger,
 ) -> dict:
     """
@@ -2862,6 +2949,9 @@ def _scrape_and_fill_cover_details(
         "addon_covers": [],
         "premium_values": {},
     }
+    if not get_coverage_details:
+        logger.info("Skipping cover scraping per the active DB row.")
+        return scraped
 
     # ── 1. Scrape OD Package options ──────────────────────────────────────
     logger.info("Scraping OD Package options from website...")
@@ -2918,15 +3008,24 @@ def _scrape_and_fill_cover_details(
         logger.warning("Could not scrape cover options: %s", exc)
 
     # ── 2. Configure selected covers according to figure ───────────────────
-    _configure_cover_checkboxes(page, logger)
+    _configure_cover_checkboxes(page, logger, cover_input)
 
     # Select TPPD Limit dropdown (e.g. 6000)
-    tppd_target = cover_input.tppd_limit or "6000"
-    _select_tppd_limit(page, logger, tppd_target)
+    tppd_target = cover_input.tppd_limit
+    if cover_input.tppd and not _select_tppd_limit(page, logger, tppd_target):
+        raise RuntimeError(
+            f"Could not select the DB-configured TPPD limit '{tppd_target}'."
+        )
 
     # Select CPA Tenure dropdown (e.g. 1)
-    cpa_target = cover_input.cpa_tenure or "1"
-    _select_cpa_tenure(page, logger, cpa_target)
+    cpa_target = cover_input.cpa_tenure
+    if (
+        cover_input.pa_to_owner_driver
+        and not _select_cpa_tenure(page, logger, cpa_target)
+    ):
+        raise RuntimeError(
+            f"Could not select the DB-configured CPA tenure '{cpa_target}'."
+        )
 
     _snap(page, "cover-details-configured", logger)
 
@@ -2972,6 +3071,10 @@ def _scrape_and_fill_cover_details(
                 logger.info("CPA Tenure: %s", cpa_val)
     except Exception:
         pass
+
+    if not calculate_premium:
+        logger.info("Skipping Calculate Premium per the active DB row.")
+        return scraped
 
     # ── 6. Click Calculate Premium ────────────────────────────────────────
     logger.info("Clicking 'Calculate Premium' button...")
@@ -3041,7 +3144,16 @@ def _scrape_and_fill_cover_details(
         except Exception as exc:
             logger.warning("Could not scrape premium values: %s", exc)
     else:
-        logger.warning("Could not find 'Calculate Premium' button!")
+        site_errors = _site_error_lines(page)
+        if site_errors:
+            raise SiteRejectedQuote(
+                "The insurer rejected the cover configuration: "
+                + " | ".join(site_errors)
+            )
+        raise RuntimeError(
+            "The active DB row requires premium calculation, but the "
+            "Calculate Premium button was not available."
+        )
 
     # ── 7. Click View Premium Summary if available ────────────────────────
     try:
@@ -3114,34 +3226,21 @@ def _fill_customer_details(
     # Discover what's actually on the page at this point
     _discover_inputs(page, logger)
 
-    # Customer Type (Kendo-styled radio checkbox — use JS click to bypass visibility)
-    try:
-        done = page.evaluate("""() => {
-            const r = document.querySelector(
-                "input#CustomerTypeIndividual, input[name*='ClientType'][value='True']"
-            );
-            if (!r) return false;
-            r.checked = true;
-            r.dispatchEvent(new Event('change', {bubbles: true}));
-            r.dispatchEvent(new Event('click',  {bubbles: true}));
-            if (window.jQuery) window.jQuery(r).trigger('change').trigger('click');
-            return true;
-        }""")
-        if done:
-            logger.info("Selected Customer Type = 'Individual' via JS click.")
-        else:
-            logger.warning("Customer Type radio not found in DOM.")
-    except Exception as exc:
-        logger.warning("Could not set Customer Type: %s", exc)
+    if not _select_customer_type(page, cust.customer_type):
+        raise RuntimeError(
+            f"Could not select DB customer_type '{cust.customer_type}'."
+        )
+    logger.info("Selected Customer Type = '%s'.", cust.customer_type)
     page.wait_for_timeout(200)
 
     # Title / Salutation — Kendo dropdown identified by aria-owns
-    salutation = "Mr." if cust.gender.lower() == "male" else "Ms."
-    if not _click_kendo_dropdown(page, logger, "salutation", salutation,
-                                  "ddlobjclienttitle", "clienttitle", "ddltitle"):
-        _select_kendo_dropdown(page, logger, "salutation", salutation,
-                                "Title", "Salutation", "ddlTitle")
-    page.wait_for_timeout(200)
+    if cust.gender:
+        salutation = "Mr." if cust.gender.lower() == "male" else "Ms."
+        if not _click_kendo_dropdown(page, logger, "salutation", salutation,
+                                      "ddlobjclienttitle", "clienttitle", "ddltitle"):
+            _select_kendo_dropdown(page, logger, "salutation", salutation,
+                                    "Title", "Salutation", "ddlTitle")
+        page.wait_for_timeout(200)
 
     # First Name
     _fill(page, logger, "first_name", cust.first_name,
@@ -3178,14 +3277,15 @@ def _fill_customer_details(
         page.wait_for_timeout(200)
 
     # Gender (Kendo dropdown)
-    if not _click_kendo_dropdown(page, logger, "gender", cust.gender,
-                                  "ddlobjclientgender", "clientgender", "ddlgender"):
-        if not _select_kendo_dropdown(page, logger, "gender", cust.gender,
-                                       "Gender", "ddlGender"):
-            _fill(page, logger, "gender", cust.gender,
-                  f"input[value='{cust.gender}'][type='radio']",
-                  f"label:has-text('{cust.gender}') input[type='radio']")
-    page.wait_for_timeout(200)
+    if cust.gender:
+        if not _click_kendo_dropdown(page, logger, "gender", cust.gender,
+                                      "ddlobjclientgender", "clientgender", "ddlgender"):
+            if not _select_kendo_dropdown(page, logger, "gender", cust.gender,
+                                           "Gender", "ddlGender"):
+                _fill(page, logger, "gender", cust.gender,
+                      f"input[value='{cust.gender}'][type='radio']",
+                      f"label:has-text('{cust.gender}') input[type='radio']")
+        page.wait_for_timeout(200)
 
     # Occupation (Kendo dropdown)
     if not _click_kendo_dropdown(page, logger, "occupation", cust.occupation,
@@ -3209,12 +3309,13 @@ def _fill_customer_details(
     page.wait_for_timeout(200)
 
     # Registered under GST (Kendo dropdown or radio)
-    if not _select_kendo_dropdown(page, logger, "gst", cust.registered_under_gst,
-                                   "GST", "ddlGST", "RegisteredGST"):
-        _fill(page, logger, "gst", cust.registered_under_gst,
-              "input[name*='GST'][value='No']",
-              f"input[value='{cust.registered_under_gst}'][type='radio']")
-    page.wait_for_timeout(200)
+    if cust.registered_under_gst:
+        if not _select_kendo_dropdown(page, logger, "gst", cust.registered_under_gst,
+                                       "GST", "ddlGST", "RegisteredGST"):
+            _fill(page, logger, "gst", cust.registered_under_gst,
+                  f"input[name*='GST'][value='{cust.registered_under_gst}']",
+                  f"input[value='{cust.registered_under_gst}'][type='radio']")
+        page.wait_for_timeout(200)
 
     # Aadhar
     if cust.aadhar:
@@ -3432,7 +3533,7 @@ def _scrape_premium_summary(
     except Exception:
         pass
     if not reg_val:
-        reg_val = vehicle.registration_number or "NEW"
+        reg_val = vehicle.registration_number
 
     # Real RTO Location string from website autocomplete
     real_rto = _get_field_value(
@@ -3452,7 +3553,7 @@ def _scrape_premium_summary(
     ) or vehicle.make_model_variant
     if real_model and any(bad in real_model.lower() for bad in _INVALID_OPTION_WORDS):
         logger.warning("Scraped model field contained invalid text '%s'; discarding.", real_model)
-        real_model = vehicle.make_model_variant if not any(bad in (vehicle.make_model_variant or "").lower() for bad in _INVALID_OPTION_WORDS) else os.getenv("VEH_MAKE_MODEL_VARIANT", "TVS JUPITER")
+        real_model = vehicle.make_model_variant
 
     # Real Fuel Type selected on the website
     real_fuel = _get_field_value(
@@ -3826,15 +3927,6 @@ def _continue_to_proposal(page: Page, logger: logging.Logger, log_dir: pathlib.P
     return True
 
 
-# Example values that were suggested as placeholders for .env. They are not a
-# real customer and must never be typed into a live proposal.
-_EXAMPLE_CUSTOMER_VALUES = {
-    "pan": "ABCDE1234F",
-    "mobile": "9876543210",
-    "email": "ravi@example.com",
-}
-
-
 def _proposal_type(page: Page, logger: logging.Logger, label: str, element_id: str, value: str) -> bool:
     """Type into a proposal-page text box by id and leave it, so the site's own checks run.
     Values are not logged: they are personal data.
@@ -3965,34 +4057,17 @@ def _fill_proposal_customer(
     """Fill Customer Details and Communication Address on the proposal page.
 
     Returns the list of things a person still has to look at. Nothing is saved
-    or submitted here: 'Validate Customer' is a separate, opt-in step.
+    or submitted here; validation is controlled by the active DB row.
     """
     # Ensure no Search Customer / Form 60 popup is open
     _close_any_modal(page, logger)
 
     logger.info("--- Filling proposal: Customer Details ---")
     problems: list[str] = []
-    # PROPOSAL_MANDATORY_ONLY=true fills only the fields the page marks with '*'.
-    mandatory_only = os.getenv("PROPOSAL_MANDATORY_ONLY", "false").strip().lower() in {"1", "true", "yes", "on"}
-    if mandatory_only:
-        logger.info("Proposal: mandatory-only mode (skipping DOB, PAN, middle name, marital status, "
-                    "nationality, street and landmark).")
-
     mobile = address.mobile or customer.mobile
     email = address.email or customer.email
-    examples = [
-        name for name, value in (("PAN", customer.pan), ("mobile", mobile), ("email", email))
-        if value and value.strip().lower() == _EXAMPLE_CUSTOMER_VALUES[name.lower()].lower()
-    ]
-    if examples:
-        message = (
-            "The customer details in .env are still the example values ("
-            + ", ".join(examples) + "). Replace the CUST_* values with a real customer's details."
-        )
-        logger.error("Proposal: not filling the customer form. %s", message)
-        return [message]
     if not customer.first_name or not customer.last_name:
-        message = "CUST_FIRST_NAME and CUST_LAST_NAME are required in .env."
+        message = "Customer first_name and last_name are required in the active DB row."
         logger.error("Proposal: not filling the customer form. %s", message)
         return [message]
 
@@ -4000,14 +4075,8 @@ def _fill_proposal_customer(
     if customer.dob:
         _proposal_type(page, logger, "Date of Birth", "DPDateOfBirth", customer.dob)
 
-    pan_value = (customer.pan or os.getenv("CUST_PAN", "")).strip().upper()
+    pan_value = customer.pan.strip().upper()
     if pan_value:
-        import re as _re
-        if len(pan_value) == 9 and _re.match(r"^[A-Z]{4}[0-9]{4}[A-Z]$", pan_value):
-            surname_char = (customer.last_name or "E").strip()[:1].upper() or "E"
-            pan_value = f"{pan_value[:4]}{surname_char}{pan_value[4:]}"
-            logger.info("Proposal: auto-completed 9-char PAN to 10-char PAN '%s'.", pan_value)
-
         logger.info("Proposal: entering PAN Number '%s'...", pan_value)
         _proposal_type(page, logger, "PAN Number", "txtMaskedPanNumber", pan_value)
 
@@ -4066,38 +4135,26 @@ def _fill_proposal_customer(
     }""")
 
     # Emergency mobile number if available
-    emergency_mobile = os.getenv("CUST_EMERGENCY_MOBILE", "").strip() or mobile
+    emergency_mobile = mobile
     if emergency_mobile:
         _proposal_type(page, logger, "Emergency Mobile No", "txtEmergencyMobileNumber", emergency_mobile)
 
     gender = (customer.gender or "").strip()
-    salutation = os.getenv("CUST_SALUTATION", "").strip()
-    if not salutation:
-        if gender.lower() == "female":
-            salutation = "Mrs." if customer.marital_status.strip().lower() == "married" else "Ms."
-        else:
-            salutation = "Mr."
-    _proposal_pick(page, logger, "Salutation", "ddlsalutation", salutation)
+    if gender:
+        salutation = (
+            "Mrs." if customer.marital_status.strip().lower() == "married" else "Ms."
+        ) if gender.lower() == "female" else "Mr."
+        _proposal_pick(page, logger, "Salutation", "ddlsalutation", salutation)
 
-    # ── First Name and Last Name placement & interchanged-check ────────────
-    # NSDL PAN verification often returns names in Surname/Given-name order,
-    # causing the portal to populate txtFirstName with surname (e.g. ELUMALAI)
-    # and txtLastName with given name (e.g. KEERTHIKA).
-    # We guarantee that First Name is set to KEERTHIKA and Last Name to ELUMALAI.
-    desired_first = (customer.first_name or os.getenv("CUST_FIRST_NAME", "KEERTHIKA")).strip().upper()
-    desired_last = (customer.last_name or os.getenv("CUST_LAST_NAME", "ELUMALAI")).strip().upper()
-    if desired_last in ("E", "E.", ""):
-        desired_last = "ELUMALAI"
-    if desired_first in ("E", "E.") and desired_last:
-        desired_first, desired_last = desired_last, "ELUMALAI"
+    desired_first = customer.first_name.strip().upper()
+    desired_last = customer.last_name.strip().upper()
 
     page_first = page.evaluate("() => (document.getElementById('txtFirstName')?.value || '').trim()").upper()
     page_last = page.evaluate("() => (document.getElementById('txtLastName')?.value || '').trim()").upper()
     logger.info("Proposal names check: on-page first='%s', last='%s' | target first='%s', last='%s'",
                 page_first, page_last, desired_first, desired_last)
 
-    if (page_first == desired_last and page_last == desired_first) or \
-       ("ELUMALAI" in page_first and "KEERTHIKA" in page_last):
+    if page_first == desired_last and page_last == desired_first:
         logger.warning(
             "Detected interchanged First Name ('%s') and Last Name ('%s') on page — swapping to correct values (First Name: '%s', Last Name: '%s').",
             page_first, page_last, desired_first, desired_last
@@ -4125,8 +4182,7 @@ def _fill_proposal_customer(
     page.wait_for_timeout(300)
 
     _proposal_type(page, logger, "First Name", "txtFirstName", desired_first)
-    if not mandatory_only:
-        _proposal_type(page, logger, "Middle Name", "txtMiddleName", customer.middle_name)
+    _proposal_type(page, logger, "Middle Name", "txtMiddleName", customer.middle_name)
     _proposal_type(page, logger, "Last Name", "txtLastName", desired_last)
 
     # The salutation usually sets the gender; only choose it if it is still empty/different.
@@ -4134,9 +4190,9 @@ def _fill_proposal_customer(
         _proposal_pick(page, logger, "Gender", "ddlgender", gender)
     if customer.occupation:
         _proposal_pick(page, logger, "Occupation", "ddloccupation", customer.occupation)
-    if customer.marital_status and not mandatory_only:
+    if customer.marital_status:
         _proposal_pick(page, logger, "Marital Status", "ddlmaritalstatus", customer.marital_status)
-    if customer.nationality and not mandatory_only:
+    if customer.nationality:
         _proposal_pick(page, logger, "Nationality", "ddlnationality", customer.nationality)
     _log_site_messages(page, logger, "after customer details", watch_ms=900)
 
@@ -4144,9 +4200,8 @@ def _fill_proposal_customer(
     logger.info("--- Filling proposal: Communication Address ---")
     _proposal_type(page, logger, "Flat/Door No", "objAddressAddress1", address.flat)
     _proposal_type(page, logger, "Premise/Building", "objAddressAddress2", address.building)
-    if not mandatory_only:
-        _proposal_type(page, logger, "Road/Street/Area", "objAddressAddress3", address.street)
-        _proposal_type(page, logger, "Nearest Landmark", "objAddressNearestLandmark", address.landmark)
+    _proposal_type(page, logger, "Road/Street/Area", "objAddressAddress3", address.street)
+    _proposal_type(page, logger, "Nearest Landmark", "objAddressNearestLandmark", address.landmark)
 
     if address.pincode:
         picked = _kendo_pick(
@@ -4483,37 +4538,24 @@ def _validate_proposal_customer(page: Page, logger: logging.Logger) -> list[str]
             pass
 
 
-def _upload_proposal_documents(page: Page, logger: logging.Logger) -> list[str]:
-    """Upload sample document in the Document Upload section on the proposal page."""
-    upload_enabled = os.getenv("UPLOAD_DOCUMENT", "true").strip().lower() in {"1", "true", "yes", "on"}
-    if not upload_enabled:
-        logger.info("Proposal: skipping Document Upload (UPLOAD_DOCUMENT=false).")
-        return []
+def _upload_proposal_documents(
+    page: Page,
+    logger: logging.Logger,
+    document_type: str,
+    document_path: str,
+) -> list[str]:
+    """Upload the document configured on the active database row."""
+    project_root = pathlib.Path(__file__).resolve().parents[1]
+    document_file = pathlib.Path(document_path)
+    if not document_file.is_absolute():
+        document_file = project_root / document_file
+    if not document_file.is_file():
+        raise FileNotFoundError(
+            f"Document configured in the active DB row does not exist: {document_file}"
+        )
 
-    logger.info("Proposal: Step - Uploading sample document in 'Document Upload' section...")
+    logger.info("Proposal: uploading the DB-configured document.")
     problems: list[str] = []
-
-    # 1. Locate / create sample document file on disk
-    base_dir = pathlib.Path(__file__).resolve().parents[1]
-    sample_dir = base_dir / "sample_documents"
-    sample_dir.mkdir(parents=True, exist_ok=True)
-    sample_file = sample_dir / "sample_document.pdf"
-
-    if not sample_file.exists():
-        try:
-            from PIL import Image, ImageDraw
-            img = Image.new("RGB", (800, 600), color=(255, 255, 255))
-            d = ImageDraw.Draw(img)
-            d.text((50, 50), "SAMPLE DOCUMENT FOR MOTOR INSURANCE PROPOSAL VERIFICATION", fill=(0, 0, 0))
-            d.text((50, 100), "Document Type: Invoice Copy / KYC Document", fill=(0, 0, 0))
-            d.text((50, 150), "Date: 21-11-2026", fill=(0, 0, 0))
-            d.rectangle([(40, 40), (760, 560)], outline=(0, 0, 200), width=3)
-            img.save(str(sample_file), "PDF", resolution=100.0)
-        except Exception as exc:
-            logger.warning("Could not create PDF sample document: %s. Using raw fallback.", exc)
-            sample_file.write_bytes(b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/MediaBox[0 0 612 792]/Parent 2 0 R>>endobj\nxref\n0 4\n0000000000 65535 f\n0000000010 00000 n\n0000000060 00000 n\n0000000117 00000 n\ntrailer<</Size 4/Root 1 0 R>>\nstartxref\n190\n%%EOF")
-
-    sample_abs_path = str(sample_file.resolve())
 
     # 2. Ensure Document Upload accordion is open
     try:
@@ -4543,44 +4585,17 @@ def _upload_proposal_documents(page: Page, logger: logging.Logger) -> list[str]:
     except Exception as exc:
         logger.debug("Document Upload expand warning: %s", exc)
 
-    # 3. Find and select the Document Type from #ddlDocType (prefer non-inspection docs like Invoice_Copy for new vehicles)
-    configured_doc_type = os.getenv("UPLOAD_DOC_TYPE", "Invoice_Copy").strip()
+    # 3. Select the exact document type configured in the DB.
     try:
         selected_doc = page.evaluate("""(pref) => {
             const ddl = document.getElementById('ddlDocType');
             if (!ddl) return null;
-            let targetOpt = null;
-            const needle = (pref || 'Invoice_Copy').toLowerCase().replace(/_/g, ' ').trim();
-            // 1. Try matching preferred text or value
-            targetOpt = Array.from(ddl.options).find(o => {
+            const needle = (pref || '').toLowerCase().replace(/_/g, ' ').trim();
+            const targetOpt = Array.from(ddl.options).find(o => {
                 const txt = (o.text || '').toLowerCase().replace(/_/g, ' ').trim();
                 const val = (o.value || '').toLowerCase().replace(/_/g, ' ').trim();
-                return txt.includes(needle) || val.includes(needle) || 
-                       (needle.includes('invoice') && (txt.includes('invoice') || val.includes('invoice')));
+                return txt === needle || val === needle;
             });
-            // 2. Fallbacks prioritizing non-inspection documents for new vehicle
-            if (!targetOpt) {
-                const fallbacks = ['invoice', 'proposal', 'kyc', 'pan', 'rc'];
-                for (const fb of fallbacks) {
-                    targetOpt = Array.from(ddl.options).find(o => {
-                        const txt = (o.text || '').toLowerCase();
-                        const val = (o.value || '').toLowerCase();
-                        return (txt.includes(fb) || val.includes(fb)) && val !== 'select' && txt !== 'select';
-                    });
-                    if (targetOpt) break;
-                }
-            }
-            // 3. Fallback to any option that is NOT 'Select' and NOT 'Inspection_report'
-            if (!targetOpt) {
-                targetOpt = Array.from(ddl.options).find(o => {
-                    const txt = (o.text || '').toLowerCase();
-                    const val = (o.value || '').toLowerCase();
-                    return val !== 'select' && txt !== 'select' && !txt.includes('inspection');
-                });
-            }
-            if (!targetOpt && ddl.options.length > 1) {
-                targetOpt = ddl.options[1];
-            }
             if (targetOpt) {
                 ddl.selectedIndex = targetOpt.index;
                 ddl.value = targetOpt.value;
@@ -4595,7 +4610,7 @@ def _upload_proposal_documents(page: Page, logger: logging.Logger) -> list[str]:
                 return targetOpt.text || targetOpt.value;
             }
             return null;
-        }""", configured_doc_type)
+        }""", document_type)
 
         if selected_doc:
             logger.info("Proposal: selected Document Type = '%s' in #ddlDocType", selected_doc)
@@ -4608,22 +4623,22 @@ def _upload_proposal_documents(page: Page, logger: logging.Logger) -> list[str]:
         logger.warning(msg)
         problems.append(msg)
 
-    # 4. Attach sample document file to #UploadedFile
+    # 4. Attach the configured document file to #UploadedFile.
     try:
         file_input = page.locator("#UploadedFile")
         if file_input.count():
-            file_input.first.set_input_files(sample_abs_path)
+            file_input.first.set_input_files(str(document_file.resolve()))
             page.evaluate("""() => {
                 const el = document.getElementById('UploadedFile');
                 if (el) el.dispatchEvent(new Event('change', { bubbles: true }));
             }""")
-            logger.info("Proposal: attached sample file '%s' to #UploadedFile.", sample_file.name)
+            logger.info("Proposal: attached DB-configured file '%s' to #UploadedFile.", document_file.name)
         else:
             msg = "Proposal: #UploadedFile file input element not found."
             logger.warning(msg)
             problems.append(msg)
     except Exception as exc:
-        msg = f"Proposal: error attaching sample file: {exc}"
+        msg = f"Proposal: error attaching the DB-configured file: {exc}"
         logger.warning(msg)
         problems.append(msg)
 
@@ -4661,7 +4676,7 @@ def _upload_proposal_documents(page: Page, logger: logging.Logger) -> list[str]:
         except PlaywrightTimeoutError:
             pass
         _snap(page, "proposal-document-uploaded", logger)
-        logger.info("Proposal: sample document upload completed successfully!")
+        logger.info("Proposal: DB-configured document upload completed successfully!")
     except Exception as exc:
         msg = f"Proposal: error clicking Upload button: {exc}"
         logger.warning(msg)
@@ -4679,12 +4694,15 @@ def _fill_proposal_vehicle_details(
     page: Page,
     vehicle: VehicleFormInput,
     customer: CustomerInput,
+    address: AddressInput,
+    cover_input: CoverDetailsInput,
+    db_row: dict,
     logger: logging.Logger,
 ) -> list[str]:
     """Automate mandatory Vehicle Details, Cover Details, Document Upload, Registration Address,
     and Premium calculation after clicking 'Validate Customer' on the proposal page."""
     problems: list[str] = []
-    logger.info("Proposal: Step - Filling mandatory Vehicle Details (Engine & Chassis) from .env / config...")
+    logger.info("Proposal: Step - Filling mandatory Vehicle Details from the active DB row.")
 
     # 1. Expand Vehicle Details section ONLY if currently collapsed
     try:
@@ -4715,7 +4733,7 @@ def _fill_proposal_vehicle_details(
         logger.debug("Vehicle Details visibility check warning: %s", exc)
 
     # 2. Fill Engine Number * (direct DOM + Playwright fill fallback)
-    engine_val = (vehicle.engine_number or os.getenv("VEH_ENGINE_NUMBER") or "JA12E3456789").strip()
+    engine_val = vehicle.engine_number.strip()
     try:
         page.evaluate("""(val) => {
             const el = document.getElementById('EngineNumberVehicle');
@@ -4747,7 +4765,7 @@ def _fill_proposal_vehicle_details(
         problems.append(msg)
 
     # 3. Fill Chassis Number * (direct DOM + Playwright fill fallback)
-    chassis_val = (vehicle.chassis_number or os.getenv("VEH_CHASSIS_NUMBER") or "MD625BG45M1234567").strip()
+    chassis_val = vehicle.chassis_number.strip()
     try:
         page.evaluate("""(val) => {
             const el = document.getElementById('ChasisNumberVehicle');
@@ -4781,7 +4799,7 @@ def _fill_proposal_vehicle_details(
     _snap(page, "proposal-vehicle-details-filled", logger)
 
     # 4. Click "Get Coverage Details" button (#btnFetchIDV)
-    should_get_coverage = os.getenv("CLICK_GET_COVERAGE_DETAILS", "true").strip().lower() in {"1", "true", "yes", "on"}
+    should_get_coverage = _required_db_bool(db_row, "click_get_coverage_details")
     if should_get_coverage:
         try:
             logger.info("Proposal: clicking 'Get Coverage Details' (#btnFetchIDV)...")
@@ -4816,38 +4834,46 @@ def _fill_proposal_vehicle_details(
 
     # 5. Handle Cover Details / Addon checkboxes on Proposal page
     try:
-        _configure_cover_checkboxes(page, logger)
-        _select_tppd_limit(page, logger)
-        _select_cpa_tenure(page, logger)
+        _configure_cover_checkboxes(page, logger, cover_input)
+        _select_tppd_limit(page, logger, cover_input.tppd_limit)
+        _select_cpa_tenure(page, logger, cover_input.cpa_tenure)
     except Exception as exc:
         logger.debug("Proposal cover re-verification notice: %s", exc)
 
-    # 5.1 If Nil Depreciation is active, ensure 'Applying for Nil dep for first time: Yes' is selected
-    try:
-        page.evaluate("""() => {
-            const nilYes = document.getElementById('divSecureNilyes') || 
-                           document.getElementById('objCovers_6__objPolicyCover_IsNilRateApplyingFirstTime') ||
-                           Array.from(document.querySelectorAll('input[type="radio"]')).find(r => {
-                               const name = (r.getAttribute('name') || '').toLowerCase();
-                               const val = (r.value || '').toLowerCase();
-                               return name.includes('isnilrateapplyingfirsttime') && (val === 'true' || val === 'yes' || r.id.includes('yes'));
-                           });
-            if (nilYes) {
-                nilYes.checked = true;
-                nilYes.dispatchEvent(new Event('change', { bubbles: true }));
-                nilYes.dispatchEvent(new Event('click', { bubbles: true }));
-            }
-        }""")
-        logger.info("Proposal: verified 'Applying for Nil dep for first time: Yes' is selected.")
-    except Exception as exc:
-        logger.debug("Nil dep first time radio notice: %s", exc)
+    # 5.1 Apply the DB-configured first-time Nil Depreciation choice.
+    if cover_input.nil_depreciation:
+        selected = page.evaluate("""(firstTime) => {
+            const wanted = firstTime ? ['true', 'yes', '1'] : ['false', 'no', '0'];
+            const radios = Array.from(document.querySelectorAll('input[type="radio"]'));
+            const target = radios.find(r => {
+                const name = (r.name || '').toLowerCase();
+                const value = (r.value || '').toLowerCase();
+                const id = (r.id || '').toLowerCase();
+                return name.includes('isnilrateapplyingfirsttime') &&
+                    (wanted.includes(value) || id.includes(firstTime ? 'yes' : 'no'));
+            });
+            if (!target) return false;
+            target.checked = true;
+            target.dispatchEvent(new Event('change', {bubbles: true}));
+            target.dispatchEvent(new Event('click', {bubbles: true}));
+            if (window.jQuery) window.jQuery(target).trigger('change').trigger('click');
+            return true;
+        }""", cover_input.nil_depreciation_first_time)
+        if not selected:
+            raise RuntimeError(
+                "Could not select the DB-configured Nil Depreciation first-time option."
+            )
+        logger.info(
+            "Proposal: selected Nil Depreciation first-time = %s.",
+            cover_input.nil_depreciation_first_time,
+        )
 
     # 6. Fill Nominee details (Mandatory when PA to Owner Driver is checked)
     try:
-        nominee_name = (customer.nominee_name or os.getenv("NOMINEE_NAME", "Murugan")).strip()
-        nominee_dob = (customer.nominee_dob or os.getenv("NOMINEE_DOB", "01-01-1975")).strip()
-        nominee_relation = (customer.nominee_relation or os.getenv("NOMINEE_RELATION", "Father")).strip()
-        nominee_age = (customer.nominee_age or os.getenv("NOMINEE_AGE", "49")).strip()
+        nominee_name = customer.nominee_name.strip()
+        nominee_dob = customer.nominee_dob.strip()
+        nominee_relation = customer.nominee_relation.strip()
+        nominee_age = customer.nominee_age.strip()
 
         logger.info("Proposal: Filling Nominee details (Name='%s', DOB='%s', Relation='%s', Age='%s')...",
                     nominee_name, nominee_dob, nominee_relation, nominee_age)
@@ -4939,17 +4965,25 @@ def _fill_proposal_vehicle_details(
     except Exception as exc:
         logger.warning("Proposal: error setting Nominee details: %s", exc)
 
-    # 7. Step - Document Upload (automatic sample document upload)
-    try:
-        upload_problems = _upload_proposal_documents(page, logger)
-        if upload_problems:
-            problems.extend(upload_problems)
-    except Exception as exc:
-        logger.warning("Proposal: Document Upload error: %s", exc)
+    # 7. Step - Document Upload (active DB row configuration)
+    if _required_db_bool(db_row, "upload_document"):
+        try:
+            upload_problems = _upload_proposal_documents(
+                page, logger,
+                _required_db_value(db_row, "upload_doc_type"),
+                _required_db_value(db_row, "upload_doc_path"),
+            )
+            if upload_problems:
+                problems.extend(upload_problems)
+        except Exception as exc:
+            logger.warning("Proposal: Document Upload error: %s", exc)
+            problems.append(f"Proposal: Document Upload error: {exc}")
+    else:
+        logger.info("Proposal: skipping document upload per the active DB row.")
 
     # 8. Check "Is Registration Address same as Communication Address?"
     try:
-        reg_same = os.getenv("REG_ADDR_SAME_AS_COMM", "true").strip().lower() in {"1", "true", "yes", "on"}
+        reg_same = address.same_as_comm
         if reg_same:
             page.evaluate("""() => {
                 const chk = document.getElementById('IsRegistrationAddresssame');
@@ -4996,7 +5030,7 @@ def _fill_proposal_vehicle_details(
         logger.warning("Proposal: error setting Registration Address checkbox: %s", exc)
 
     # 9. Calculate Premium if configured
-    should_calc = os.getenv("CLICK_CALCULATE_PREMIUM", "true").strip().lower() in {"1", "true", "yes", "on"}
+    should_calc = _required_db_bool(db_row, "click_calculate_premium")
     if should_calc:
         calc_dialog_msgs = []
         def _calc_dialog_handler(dialog):
@@ -5054,7 +5088,7 @@ def _fill_proposal_vehicle_details(
 
             # 9.5. Save Proposal Details to Database (#btnSave / SaveInformation())
             # CRITICAL: Payment requires the proposal and calculated premium to be saved in the DB first!
-            should_save = os.getenv("SAVE_PROPOSAL", "true").strip().lower() in {"1", "true", "yes", "on"}
+            should_save = _required_db_bool(db_row, "save_proposal")
             if should_save:
                 logger.info("Proposal: Step - Saving proposal information to backend database (#btnSave / SaveInformation)...")
                 page.wait_for_timeout(1000)
@@ -5102,7 +5136,7 @@ def _fill_proposal_vehicle_details(
                 _snap(page, "proposal-after-save", logger)
 
             # 10. Advance to Payment Details next step (#BtnmakeLive / makeLivePayment)
-            should_pay = os.getenv("PROCEED_TO_PAYMENT", "true").strip().lower() in {"1", "true", "yes", "on"}
+            should_pay = _required_db_bool(db_row, "proceed_to_payment")
             if should_pay:
                 logger.info("Proposal: Step - Proceeding to Payment Details next step (#BtnmakeLive)...")
                 page.wait_for_timeout(1500)
@@ -5197,16 +5231,10 @@ def scrape_vehicle_coverage(
     username: str | None = None,
     password: str | None = None,
     scrape_type: str = "full",
-    vehicle_data: dict | None = None,
-    cover_data: dict | None = None,
-    customer_data: dict | None = None,
-    address_data: dict | None = None,
-    **kwargs,
 ) -> str:
     """Login, navigate, fill form, scrape covers, fill customer, scrape premium, save to Postgres.
 
-    All form values are dynamic — read from API request params, .env fallbacks,
-    or computed defaults (today's date, current year/month).
+    Insurance and proposal inputs are read only from the latest active DB row.
     """
     log_dir = pathlib.Path(__file__).resolve().parents[1] / "logs"
     logger: logging.Logger = configure_logger(log_dir)
@@ -5215,27 +5243,15 @@ def scrape_vehicle_coverage(
     if website_url:
         import dataclasses
         settings = dataclasses.replace(settings, base_url=website_url)
-    # Merge any vehicle-related kwargs into vehicle_data
-    v_overrides = dict(vehicle_data or {})
-    for k in (
-        "registration_number", "rto_location", "make_model_variant",
-        "manufacturing_year", "manufacturing_month", "purchase_date",
-        "purchase_registration_date", "policy_start_date", "idv",
-        "fuel_type", "business_type", "customer_type", "ncb",
-        "ncb_eligibility", "discount", "data_discount_percent", "is_new_vehicle",
-    ):
-        if k in kwargs and kwargs[k] is not None:
-            v_overrides[k] = kwargs[k]
-
-    # Load DB input row once — API params override DB; .env is last resort
+    # Load and validate the DB input row before opening a browser.
     _db_row = _load_db_row()
-    _scrape_input_id: int | None = int(_db_row["id"]) if _db_row and _db_row.get("id") else None
+    _scrape_input_id = int(_required_db_value(_db_row, "id"))
+    _validate_db_workflow(_db_row)
 
-    # Build dynamic inputs — API params > DB row > .env defaults
-    vehicle = _build_vehicle_input(v_overrides, _db_row=_db_row)
-    cover_input = _build_cover_details_input(cover_data, _db_row=_db_row)
-    customer = _build_customer_input(customer_data, _db_row=_db_row)
-    address = _build_address_input(address_data, _db_row=_db_row)
+    vehicle = _build_vehicle_input(_db_row)
+    cover_input = _build_cover_details_input(_db_row)
+    customer = _build_customer_input(_db_row)
+    address = _build_address_input(_db_row)
 
     logger.info(
         "Vehicle scraper started | reg=%s | rto=%s | model=%s | "
@@ -5308,7 +5324,12 @@ def scrape_vehicle_coverage(
 
             # ── Step 3: Fill Vehicle Details + click Get Coverage Details ─
             logger.info("Step 3: Filling Vehicle Details form.")
-            _fill_vehicle_details(page, vehicle, logger)
+            _fill_vehicle_details(
+                page, vehicle, logger,
+                click_get_coverage_details=_required_db_bool(
+                    _db_row, "click_get_coverage_details"
+                ),
+            )
 
             # Verify mandatory fields after initial fill
             logger.info("Verifying mandatory vehicle fields...")
@@ -5316,7 +5337,16 @@ def scrape_vehicle_coverage(
 
             # ── Step 4: Scrape & Fill Cover Details ───────────────────────
             logger.info("Step 4: Scraping & filling Cover Details (OD, Liability, AddOns).")
-            cover_scraped = _scrape_and_fill_cover_details(page, cover_input, logger)
+            cover_scraped = _scrape_and_fill_cover_details(
+                page, cover_input,
+                get_coverage_details=_required_db_bool(
+                    _db_row, "click_get_coverage_details"
+                ),
+                calculate_premium=_required_db_bool(
+                    _db_row, "click_calculate_premium"
+                ),
+                logger=logger,
+            )
 
             # If the site refused to price the quote there is no customer step to do.
             site_errors = _site_error_lines(page)
@@ -5367,13 +5397,21 @@ def scrape_vehicle_coverage(
                     f"IDV={coverage.idv}): " + " | ".join(site_errors)
                 )
             if not has_premium:
-                logger.warning("No premium amounts were found on the page; saving the vehicle and cover details only.")
+                if _required_db_bool(_db_row, "click_calculate_premium"):
+                    raise RuntimeError(
+                        "The active DB row requested premium calculation, but no "
+                        "premium amount was found. The quote was not saved."
+                    )
+                logger.info(
+                    "No premium amounts were found; continuing because the active "
+                    "DB row disables premium calculation."
+                )
 
             # ── Step 9: Save to PostgreSQL (7 Normalized Tables) ─────────
             logger.info("Step 9: Saving to PostgreSQL across 7 normalized tables.")
             row_id = save_coverage(
                 coverage,
-                session_id=_scrape_input_id,
+                scrape_input_id=_scrape_input_id,
                 vehicle=vehicle,
                 customer=customer,
                 address=address,
@@ -5382,16 +5420,11 @@ def scrape_vehicle_coverage(
 
             # ── Step 10 (opt-in): Continue to Buy → proposal page ─────────
             # The quote is already saved, so a problem here cannot lose it.
-            _ctb_env = os.getenv("CONTINUE_TO_BUY", "false").strip().lower() in {"1", "true", "yes", "on"}
-            _ctb_db = bool((_db_row or {}).get("continue_to_buy", False))
-            if has_premium and (_ctb_env or _ctb_db):
+            if has_premium and _required_db_bool(_db_row, "continue_to_buy"):
                 try:
                     if _continue_to_proposal(page, logger, log_dir):
                         problems = _fill_proposal_customer(page, customer, address, logger)
-                        _vc_env = os.getenv("VALIDATE_CUSTOMER", "true").strip().lower() in {"1", "true", "yes", "on"}
-                        _vc_db = (_db_row or {}).get("validate_customer")
-                        validate = _vc_db if _vc_db is not None else _vc_env
-                        if validate:
+                        if _required_db_bool(_db_row, "validate_customer"):
                             if problems:
                                 logger.warning("Proposal: some fields need attention (%s), but proceeding to click 'Validate Customer'.", "; ".join(problems))
                             reasons = _validate_proposal_customer(page, logger)
@@ -5402,15 +5435,18 @@ def scrape_vehicle_coverage(
                                 return !!(document.getElementById('EngineNumberVehicle') || document.getElementById('ChasisNumberVehicle'));
                             }""")
                             if not reasons or has_vehicle_section:
-                                logger.info("Proposal: Customer validated successfully. Proceeding to fill mandatory Vehicle Details from .env...")
-                                veh_problems = _fill_proposal_vehicle_details(page, vehicle, customer, logger)
+                                logger.info("Proposal: Customer validated successfully. Proceeding with DB-configured details.")
+                                veh_problems = _fill_proposal_vehicle_details(
+                                    page, vehicle, customer, address, cover_input,
+                                    _db_row, logger,
+                                )
                                 if veh_problems:
                                     logger.warning("Proposal: Vehicle Details completed with notes: %s", "; ".join(veh_problems))
                                 else:
                                     logger.info("Proposal: Vehicle Details and subsequent mandatory steps completed successfully!")
                         else:
                             logger.info(
-                                "Proposal: skipping 'Validate Customer' (VALIDATE_CUSTOMER=false)."
+                                "Proposal: skipping 'Validate Customer' per the active DB row."
                             )
                 except Exception as exc:
                     logger.error("Continue to Buy step failed: %s", exc)
@@ -5441,11 +5477,7 @@ def scrape_vehicle_coverage(
             except ValueError:
                 keep_open = 0
             if keep_open > 0 and not settings.headless:
-                logger.info("Keeping the browser open for %d s before closing.", keep_open)
-                try:
-                    page.wait_for_timeout(keep_open * 1000)
-                except Exception:
-                    pass  # the window was closed by hand
+                _wait_for_browser_review(page, logger, keep_open)
             context.close()
             browser.close()
 
